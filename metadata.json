@@ -1,0 +1,6 @@
+{
+  "name": "RC MEGA",
+  "description": "Premium RC models, genuine spares, and expert support for the hobbyist enthusiast.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
