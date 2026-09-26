@@ -36,7 +36,8 @@ app.get('/api/products', async (req, res) => {
     })
     .from(products)
     .leftJoin(brands, eq(products.brandId, brands.id))
-    .leftJoin(categories, eq(products.categoryId, categories.id));
+    .leftJoin(categories, eq(products.categoryId, categories.id))
+    .$dynamic();
 
     const conditions = [];
 

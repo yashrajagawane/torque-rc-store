@@ -2,7 +2,7 @@ import { motion } from 'framer-motion';
 
 export const Hero = () => {
   return (
-    <section className="relative min-h-[600px] md:h-screen flex items-center justify-center overflow-hidden pt-20 md:pt-24 pb-12">
+    <section className="relative min-h-[650px] md:min-h-[750px] lg:h-screen flex flex-col justify-center overflow-hidden pt-28 sm:pt-32 md:pt-36 lg:pt-32 pb-16">
       {/* Background Image with Parallax */}
       <motion.div 
         className="absolute inset-0 z-0"
@@ -19,16 +19,17 @@ export const Hero = () => {
       </motion.div>
 
       {/* Overlay Content */}
-      <div className="container relative z-10 px-4 md:px-6">
+      <div className="container relative z-10 px-4 md:px-6 mt-6 sm:mt-8 md:mt-10">
         <div className="max-w-3xl">
           <motion.div
             initial={{ opacity: 0, y: 30 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.8, delay: 0.2 }}
           >
-            <span className="text-accent font-mono text-xs md:text-sm font-bold uppercase tracking-[0.3em] block mb-3 [word-spacing:0.2em]">
-              Performance Engineering
-            </span>
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded bg-accent/20 border border-accent/40 text-accent font-mono text-[11px] sm:text-xs md:text-sm font-bold uppercase tracking-[0.25em] mb-4 shadow-sm backdrop-blur-sm">
+              <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
+              <span>Performance Engineering</span>
+            </div>
             <h1 className="text-3xl sm:text-4xl md:text-5xl lg:text-6xl mb-5 leading-tight [word-spacing:0.25em]">
               BUILT FOR THE <br />
               <span className="text-accent italic underline decoration-white/10 underline-offset-8">THRILL</span> OF CONTROL.
