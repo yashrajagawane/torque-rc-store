@@ -18,18 +18,18 @@ export const BrandStrip = () => {
     <section className="py-16 border-y border-white/5 bg-[#050505]">
       <div className="container px-4 md:px-6">
         <div className="flex flex-col items-center justify-center mb-10 text-center">
-          <span className="text-accent font-mono text-[10px] font-bold uppercase tracking-[0.4em] block mb-2">
+          <span className="text-accent font-mono text-[10px] font-bold uppercase tracking-[0.3em] block mb-2 [word-spacing:0.15em]">
             Trusted Partners
           </span>
-          <h4 className="text-xl text-white/40 italic">AUTHORIZED DISTRIBUTORS OF TOP RC BRANDS</h4>
+          <h4 className="text-xs md:text-sm font-bold text-white/50 tracking-wider uppercase [word-spacing:0.2em]">AUTHORIZED DISTRIBUTORS OF TOP RC BRANDS</h4>
         </div>
         
-        <div className="flex items-center gap-x-12 gap-y-8 opacity-50 grayscale hover:grayscale-0 transition-all duration-500 overflow-x-auto no-scrollbar pb-4 md:pb-0 md:flex-wrap md:justify-center">
+        <div className="flex items-center gap-x-10 gap-y-6 opacity-60 hover:opacity-100 transition-all duration-500 overflow-x-auto no-scrollbar pb-4 md:pb-0 md:flex-wrap md:justify-center">
           {BRANDS.map((brand) => (
             <a 
               key={brand.slug}
               href={`/brands/${brand.slug}`}
-              className="text-2xl md:text-3xl font-black italic tracking-tighter hover:text-accent transition-colors whitespace-nowrap shrink-0"
+              className="text-base md:text-lg font-extrabold italic tracking-wider [word-spacing:0.2em] hover:text-accent transition-colors whitespace-nowrap shrink-0"
             >
               {brand.name}
             </a>

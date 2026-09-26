@@ -4,14 +4,15 @@ import { Link, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '../../lib/utils';
 import { useCartStore } from '../../store/cartStore';
+import { useWishlistStore } from '../../store/wishlistStore';
 import { CartDrawer } from '../cart/CartDrawer';
 import { SearchOverlay } from '../search/SearchOverlay';
 
 export const AnnouncementBar = () => {
   return (
-    <div className="bg-primary text-primary-foreground py-2 px-4 text-center text-[10px] md:text-xs font-bold tracking-[0.1em] uppercase border-b border-white/10 relative z-[60]">
+    <div className="bg-primary text-primary-foreground py-1 px-4 text-center text-[9px] md:text-[11px] font-bold tracking-wider uppercase border-b border-white/10 relative z-50 [word-spacing:0.15em]">
       PREMIUM RC MODELS • GENUINE SPARES • EXPERT SUPPORT
-      <Link to="/collections/all-rc-models" className="ml-2 underline hover:text-accent transition-colors">
+      <Link to="/collections/all-rc-models" className="ml-2 underline hover:text-accent transition-colors [word-spacing:0.1em]">
         Explore Collection →
       </Link>
     </div>
@@ -39,10 +40,12 @@ export const Header = ({ onOpenCart, onOpenSearch }: HeaderProps) => {
   const location = useLocation();
   const cartItems = useCartStore((state) => state.items);
   const cartCount = cartItems.reduce((acc, item) => acc + item.quantity, 0);
+  const wishlistItems = useWishlistStore((state) => state.items);
+  const wishlistCount = wishlistItems.length;
 
   useEffect(() => {
     const handleScroll = () => {
-      setIsScrolled(window.scrollY > 50);
+      setIsScrolled(window.scrollY > 20);
     };
     window.addEventListener('scroll', handleScroll);
     return () => window.removeEventListener('scroll', handleScroll);
@@ -54,35 +57,39 @@ export const Header = ({ onOpenCart, onOpenSearch }: HeaderProps) => {
   }, [location.pathname]);
 
   return (
-    <>
-      <header
+    <header className="fixed top-0 left-0 w-full z-50 shadow-md">
+      {/* Top Notification Announcement Strip */}
+      <AnnouncementBar />
+
+      {/* Main Navigation Bar with Compact Padding & Solid Dark Backdrop Shield */}
+      <div
         className={cn(
-          'fixed top-0 left-0 w-full z-50 transition-all duration-300 border-b',
+          'w-full transition-all duration-200 border-b',
           isScrolled
-            ? 'bg-background/95 backdrop-blur-md py-3 border-white/5 shadow-xl translate-y-0'
-            : 'bg-transparent py-5 border-transparent'
+            ? 'bg-background/95 backdrop-blur-md py-2 border-white/10 shadow-xl'
+            : 'bg-background/90 md:bg-black/90 backdrop-blur-md py-2.5 md:py-3 border-white/10'
         )}
       >
         <div className="container mx-auto px-4 md:px-6 flex items-center justify-between">
           {/* Left: Logo */}
-          <div className="flex items-center gap-8">
+          <div className="flex items-center gap-6 md:gap-8">
             <Link to="/" className="flex items-center gap-2 group">
-              <div className="w-10 h-10 bg-primary flex items-center justify-center rounded-sm skew-x-[-10deg] group-hover:bg-accent transition-colors border border-white/10">
-                <span className="text-white font-black text-xl skew-x-[10deg]">RM</span>
+              <div className="w-8 h-8 md:w-9 md:h-9 bg-primary flex items-center justify-center rounded-sm skew-x-[-10deg] group-hover:bg-accent transition-colors border border-white/10">
+                <span className="text-white font-black text-base md:text-lg skew-x-[10deg]">RM</span>
               </div>
-              <span className="text-xl font-black tracking-tighter text-white uppercase italic">
+              <span className="text-lg md:text-xl font-black tracking-normal text-white uppercase italic [word-spacing:0.15em]">
                 RC<span className="text-accent">MEGA</span>
               </span>
             </Link>
 
             {/* Desktop Nav */}
-            <nav className="hidden lg:flex items-center gap-6">
+            <nav className="hidden lg:flex items-center gap-5 xl:gap-6">
               {NAV_LINKS.map((link) => (
                 <Link
                   key={link.name}
                   to={link.href}
                   className={cn(
-                    "text-xs font-bold uppercase tracking-widest transition-colors",
+                    "text-xs font-bold uppercase tracking-wider transition-colors py-1",
                     location.pathname === link.href ? "text-accent" : "text-muted-foreground hover:text-white"
                   )}
                 >
@@ -103,8 +110,13 @@ export const Header = ({ onOpenCart, onOpenSearch }: HeaderProps) => {
             <Link to="/account" className="hidden md:block text-muted-foreground hover:text-white transition-colors">
               <User size={20} />
             </Link>
-            <Link to="/wishlist" className="text-muted-foreground hover:text-white transition-colors">
+            <Link to="/wishlist" className="relative text-muted-foreground hover:text-white transition-colors group">
               <Heart size={20} />
+              {wishlistCount > 0 && (
+                <span className="absolute -top-2 -right-2 bg-accent text-white text-[10px] font-black w-4 h-4 flex items-center justify-center rounded-full italic">
+                  {wishlistCount}
+                </span>
+              )}
             </Link>
             <button 
               onClick={onOpenCart}
@@ -157,7 +169,7 @@ export const Header = ({ onOpenCart, onOpenSearch }: HeaderProps) => {
             </motion.div>
           )}
         </AnimatePresence>
-      </header>
-    </>
+      </div>
+    </header>
   );
 };

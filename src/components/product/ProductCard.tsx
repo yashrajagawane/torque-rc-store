@@ -3,6 +3,7 @@ import { Heart, ShoppingCart, ArrowRight } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { cn, formatCurrency } from '../../lib/utils';
 import { useCartStore } from '../../store/cartStore';
+import { useWishlistStore } from '../../store/wishlistStore';
 
 interface ProductCardProps {
   id: number;
@@ -30,6 +31,8 @@ export const ProductCard = ({
   featured,
 }: ProductCardProps) => {
   const addItem = useCartStore((state) => state.addItem);
+  const toggleWishlist = useWishlistStore((state) => state.toggleItem);
+  const isWishlisted = useWishlistStore((state) => state.isInWishlist(id));
 
   const handleAddToCart = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -42,6 +45,22 @@ export const ProductCard = ({
       quantity: 1,
       brandName,
       availability
+    });
+  };
+
+  const handleToggleWishlist = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    toggleWishlist({
+      id,
+      slug,
+      name,
+      price,
+      thumbnail,
+      brandName,
+      scale,
+      terrain,
+      availability,
     });
   };
 
@@ -72,8 +91,17 @@ export const ProductCard = ({
           )}
         </div>
 
-        <button className="absolute top-4 right-4 w-10 h-10 bg-black/50 backdrop-blur-md rounded-full flex items-center justify-center text-white opacity-0 group-hover:opacity-100 transition-opacity hover:bg-accent">
-          <Heart size={18} />
+        <button 
+          onClick={handleToggleWishlist}
+          title={isWishlisted ? "Remove from Wishlist" : "Add to Wishlist"}
+          className={cn(
+            "absolute top-4 right-4 w-10 h-10 rounded-full flex items-center justify-center transition-all z-10",
+            isWishlisted
+              ? "bg-accent text-white opacity-100 shadow-lg scale-105"
+              : "bg-black/50 backdrop-blur-md text-white opacity-0 group-hover:opacity-100 hover:bg-accent"
+          )}
+        >
+          <Heart size={18} fill={isWishlisted ? "currentColor" : "none"} />
         </button>
       </Link>
 
@@ -83,20 +111,20 @@ export const ProductCard = ({
             {brandName}
           </span>
         </div>
-        <h3 className="text-sm md:text-lg font-black mb-2 line-clamp-1 leading-tight tracking-tight italic">
+        <h3 className="text-sm md:text-base font-bold mb-2 line-clamp-1 leading-tight tracking-normal italic [word-spacing:0.18em]">
           <Link to={`/products/${slug}`} className="hover:text-accent transition-colors">
             {name}
           </Link>
         </h3>
         
-        <div className="flex items-center gap-1.5 md:gap-2 mb-4 text-[8px] md:text-[10px] text-muted-foreground font-bold uppercase tracking-widest">
+        <div className="flex items-center gap-1.5 md:gap-2 mb-4 text-[8px] md:text-[10px] text-muted-foreground font-semibold uppercase tracking-wider [word-spacing:0.1em]">
           {scale && <span>{scale}</span>}
           {scale && terrain && <span className="text-white/10">•</span>}
           {terrain && <span className="truncate">{terrain}</span>}
         </div>
 
         <div className="mt-auto flex items-center justify-between pt-4 border-t border-white/5">
-          <span className="text-lg md:text-xl font-black italic tracking-tighter">
+          <span className="text-base md:text-lg font-black italic tracking-normal [word-spacing:0.15em]">
             {formatCurrency(price)}
           </span>
           <button 

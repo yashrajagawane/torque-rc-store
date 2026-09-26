@@ -29,12 +29,12 @@ export const FeaturedProducts = () => {
       <div className="container px-4 md:px-6">
         <div className="flex flex-col md:flex-row items-end justify-between mb-12 gap-6">
           <div>
-            <span className="text-accent font-mono text-xs font-bold uppercase tracking-[0.4em] block mb-4">
+            <span className="text-accent font-mono text-xs font-bold uppercase tracking-[0.3em] block mb-3 [word-spacing:0.2em]">
               Hand-Picked Selection
             </span>
-            <h2 className="text-4xl md:text-5xl lg:text-6xl">POPULAR MACHINES</h2>
+            <h2 className="text-2xl sm:text-3xl md:text-4xl [word-spacing:0.25em]">POPULAR MACHINES</h2>
           </div>
-          <Link to="/collections/all-rc-models" className="group flex items-center gap-3 text-xs font-black uppercase tracking-widest italic hover:text-accent transition-colors">
+          <Link to="/collections/all-rc-models" className="group flex items-center gap-3 text-xs font-black uppercase tracking-wider italic hover:text-accent transition-colors [word-spacing:0.15em]">
             View All Products <ArrowRight size={16} className="group-hover:translate-x-2 transition-transform" />
           </Link>
         </div>

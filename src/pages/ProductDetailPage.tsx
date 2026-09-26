@@ -1,13 +1,16 @@
 import { useState, useEffect } from 'react';
-import { ShoppingCart, Heart, ArrowLeft, Truck, ShieldCheck, Zap, Info } from 'lucide-react';
+import { ShoppingCart, Heart, ArrowLeft, Truck, ShieldCheck, Zap, Info, MessageSquare } from 'lucide-react';
 import { formatCurrency, cn } from '../lib/utils';
 import { useCartStore } from '../store/cartStore';
+import { useWishlistStore } from '../store/wishlistStore';
 
 export const ProductDetailPage = ({ slug }: { slug: string }) => {
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [quantity, setQuantity] = useState(1);
   const addItem = useCartStore((state) => state.addItem);
+  const toggleWishlist = useWishlistStore((state) => state.toggleItem);
+  const isInWishlist = useWishlistStore((state) => state.isInWishlist);
 
   useEffect(() => {
     const fetchProduct = async () => {
@@ -140,11 +143,40 @@ export const ProductDetailPage = ({ slug }: { slug: string }) => {
               </div>
 
               <div className="flex flex-col sm:flex-row items-stretch gap-4">
-                 <button className="flex-grow bg-[#111] text-white border border-white/10 font-black uppercase italic tracking-widest h-14 rounded-sm skew-x-[-10deg] hover:bg-white hover:text-black transition-all">
-                    <span className="skew-x-[10deg]">Order via WhatsApp</span>
-                 </button>
-                 <button className="h-14 sm:w-14 border border-white/10 flex items-center justify-center rounded-sm skew-x-[-10deg] hover:border-accent hover:text-accent transition-all">
-                    <span className="skew-x-[10deg]"><Heart size={20} /></span>
+                 <a
+                   href={`https://wa.me/?text=${encodeURIComponent(`Hello RC MEGA Pit Crew! I want to order/inquire about: ${product.name} (SKU: ${product.slug}). Please provide delivery and payment details.`)}`}
+                   target="_blank"
+                   rel="noopener noreferrer"
+                   className="flex-grow bg-[#111] text-white border border-emerald-500/40 hover:border-emerald-500 hover:bg-emerald-500 hover:text-black font-black uppercase italic tracking-widest h-14 rounded-sm skew-x-[-10deg] flex items-center justify-center transition-all group"
+                 >
+                    <span className="skew-x-[10deg] flex items-center gap-2 text-xs">
+                      <MessageSquare size={18} className="text-emerald-400 group-hover:text-black" />
+                      Order via WhatsApp
+                    </span>
+                 </a>
+                 <button
+                   onClick={() => toggleWishlist({
+                     id: product.id,
+                     slug: product.slug,
+                     name: product.name,
+                     price: product.price,
+                     thumbnail: product.thumbnail,
+                     brandName: brandName,
+                     scale: product.scale,
+                     terrain: product.terrain,
+                     availability: product.availability
+                   })}
+                   title={isInWishlist(product.id) ? "Saved in Wishlist" : "Add to Wishlist"}
+                   className={cn(
+                     "h-14 sm:w-14 border rounded-sm skew-x-[-10deg] flex items-center justify-center transition-all",
+                     isInWishlist(product.id)
+                       ? "bg-accent border-accent text-white shadow-lg"
+                       : "border-white/10 hover:border-accent hover:text-accent"
+                   )}
+                 >
+                    <span className="skew-x-[10deg]">
+                      <Heart size={20} fill={isInWishlist(product.id) ? "currentColor" : "none"} />
+                    </span>
                  </button>
               </div>
             </div>

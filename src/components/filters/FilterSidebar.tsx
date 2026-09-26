@@ -8,8 +8,17 @@ interface FilterSidebarProps {
 }
 
 const BRANDS = ['RGT', 'MJX', 'FMS', 'JJRC', 'HB Toys', 'MNRC', 'Rlaarlo', 'Heng Long', 'Jiabaile', 'Suchiyu'];
-const SCALES = ['1:8', '1:10', '1:12', '1:14', '1:16', '1:18', '1:20'];
-const TYPES = ['Crawlers', 'Bashers', 'Drift', 'On-road', 'Construction', 'Marine'];
+const SCALES = ['1:8', '1:10', '1:12', '1:14', '1:16', '1:18', '1:20', 'Universal'];
+const TYPES = [
+  { name: 'Crawlers', slug: 'crawlers' },
+  { name: 'Bashers', slug: 'bashers' },
+  { name: 'Drift', slug: 'drift' },
+  { name: 'On-road', slug: 'on-road' },
+  { name: 'Construction', slug: 'construction' },
+  { name: 'Marine', slug: 'marine' },
+  { name: 'Spare Parts', slug: 'spare-parts' },
+  { name: 'Accessories', slug: 'accessories' },
+];
 
 export const FilterSidebar = ({ onFilterChange, activeFilters }: FilterSidebarProps) => {
   const toggleFilter = (key: string, value: string) => {
@@ -63,18 +72,18 @@ export const FilterSidebar = ({ onFilterChange, activeFilters }: FilterSidebarPr
       </div>
 
       <div>
-        <h4 className="text-sm font-black uppercase tracking-[0.2em] mb-6 border-b border-white/5 pb-2">Machine Type</h4>
+        <h4 className="text-sm font-black uppercase tracking-[0.2em] mb-6 border-b border-white/5 pb-2">Category & Type</h4>
         <div className="space-y-3">
           {TYPES.map((type) => (
-            <label key={type} className="flex items-center gap-3 cursor-pointer group">
+            <label key={type.slug} className="flex items-center gap-3 cursor-pointer group">
               <input 
                 type="checkbox" 
                 className="w-4 h-4 rounded-sm bg-[#111] border-white/10 checked:bg-accent focus:ring-0"
-                checked={(activeFilters.category || []).includes(type.toLowerCase())}
-                onChange={() => toggleFilter('category', type.toLowerCase())}
+                checked={(activeFilters.category || []).includes(type.slug)}
+                onChange={() => toggleFilter('category', type.slug)}
               />
               <span className="text-xs font-bold uppercase tracking-widest text-muted-foreground group-hover:text-white transition-colors">
-                {type}
+                {type.name}
               </span>
             </label>
           ))}

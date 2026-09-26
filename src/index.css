@@ -25,11 +25,19 @@
 
   body {
     @apply bg-background text-foreground antialiased;
+    word-spacing: 0.08em;
+    letter-spacing: 0.01em;
   }
 
   h1, h2, h3, h4, h5, h6 {
     font-family: var(--font-display);
-    @apply font-black tracking-tight uppercase italic;
+    word-spacing: 0.22em;
+    letter-spacing: 0.02em;
+    @apply font-black uppercase italic;
+  }
+
+  p, span, a, button, input, label {
+    word-spacing: 0.06em;
   }
 }
 

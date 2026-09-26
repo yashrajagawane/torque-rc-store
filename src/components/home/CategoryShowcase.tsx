@@ -47,12 +47,12 @@ export const CategoryShowcase = () => {
       <div className="container px-4 md:px-6">
         <div className="flex flex-col md:flex-row items-end justify-between mb-12 gap-6">
           <div>
-            <span className="text-accent font-mono text-xs font-bold uppercase tracking-[0.4em] block mb-4">
+            <span className="text-accent font-mono text-xs font-bold uppercase tracking-[0.3em] block mb-3 [word-spacing:0.2em]">
               Explore Categories
             </span>
-            <h2 className="text-4xl md:text-5xl lg:text-6xl">FIND YOUR MACHINE</h2>
+            <h2 className="text-2xl sm:text-3xl md:text-4xl [word-spacing:0.25em]">FIND YOUR MACHINE</h2>
           </div>
-          <Link to="/collections/all-rc-models" className="group flex items-center gap-3 text-xs font-black uppercase tracking-widest italic hover:text-accent transition-colors">
+          <Link to="/collections/all-rc-models" className="group flex items-center gap-3 text-xs font-black uppercase tracking-wider italic hover:text-accent transition-colors [word-spacing:0.15em]">
             View All Collections <ArrowRight size={16} className="group-hover:translate-x-2 transition-transform" />
           </Link>
         </div>
@@ -77,8 +77,8 @@ export const CategoryShowcase = () => {
                   referrerPolicy="no-referrer"
                 />
                 <div className="absolute inset-0 bg-gradient-to-t from-black via-black/20 to-transparent p-8 flex flex-col justify-end">
-                  <h3 className="text-2xl md:text-3xl mb-1 italic tracking-tighter">{cat.name}</h3>
-                  <p className="text-muted-foreground text-xs font-bold uppercase tracking-widest mb-4">
+                  <h3 className="text-xl md:text-2xl mb-1.5 italic tracking-normal [word-spacing:0.2em]">{cat.name}</h3>
+                  <p className="text-muted-foreground text-xs font-semibold uppercase tracking-wider mb-4 [word-spacing:0.15em]">
                     {cat.description}
                   </p>
                   <div className="w-12 h-12 bg-white/10 backdrop-blur-md flex items-center justify-center rounded-sm skew-x-[-10deg] group-hover:bg-accent transition-colors">

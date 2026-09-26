@@ -37,7 +37,7 @@ export const CartDrawer = ({ isOpen, onClose }: CartDrawerProps) => {
             <div className="p-6 border-b border-white/5 flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <ShoppingBag size={20} className="text-accent" />
-                <h2 className="text-xl font-black italic tracking-tighter uppercase">Your Garage</h2>
+                <h2 className="text-lg font-black italic tracking-normal uppercase [word-spacing:0.2em]">Your Garage</h2>
               </div>
               <button onClick={onClose} className="p-2 hover:bg-white/5 rounded-full transition-colors">
                 <X size={20} />
@@ -90,8 +90,8 @@ export const CartDrawer = ({ isOpen, onClose }: CartDrawerProps) => {
             {items.length > 0 && (
               <div className="p-6 bg-[#050505] border-t border-white/5">
                 <div className="flex justify-between mb-6">
-                  <span className="text-xs font-black uppercase tracking-widest text-muted-foreground">Subtotal</span>
-                  <span className="text-xl font-black italic tracking-tighter">{formatCurrency(subtotal)}</span>
+                  <span className="text-xs font-black uppercase tracking-widest text-muted-foreground [word-spacing:0.1em]">Subtotal</span>
+                  <span className="text-lg font-black italic tracking-normal [word-spacing:0.15em]">{formatCurrency(subtotal)}</span>
                 </div>
                 <button className="btn-primary w-full py-5 flex items-center justify-center gap-3 mb-3">
                   <span className="skew-x-[10deg] flex items-center gap-2">PROCEED TO CHECKOUT</span>

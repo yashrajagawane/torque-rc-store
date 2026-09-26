@@ -2,17 +2,20 @@ import { Home, Search, LayoutGrid, Heart, ShoppingBag } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
 import { cn } from '../../lib/utils';
 import { useCartStore } from '../../store/cartStore';
+import { useWishlistStore } from '../../store/wishlistStore';
 
 export const MobileBottomNav = ({ onSearchClick }: { onSearchClick: () => void }) => {
   const location = useLocation();
   const cartItems = useCartStore((state) => state.items);
   const cartCount = cartItems.reduce((acc, item) => acc + item.quantity, 0);
+  const wishlistItems = useWishlistStore((state) => state.items);
+  const wishlistCount = wishlistItems.length;
 
   const navItems = [
     { icon: Home, label: 'Home', href: '/' },
     { icon: Search, label: 'Search', onClick: onSearchClick },
     { icon: LayoutGrid, label: 'Models', href: '/collections/all-rc-models' },
-    { icon: Heart, label: 'Wishlist', href: '/wishlist' },
+    { icon: Heart, label: 'Wishlist', href: '/wishlist', count: wishlistCount },
     { icon: ShoppingBag, label: 'Garage', href: '/cart', count: cartCount },
   ];
 

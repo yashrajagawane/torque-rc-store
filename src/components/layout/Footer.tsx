@@ -10,11 +10,11 @@ export const Footer = () => {
             <div className="w-8 h-8 bg-primary flex items-center justify-center rounded-sm skew-x-[-10deg]">
               <span className="text-white font-black text-lg skew-x-[10deg]">RM</span>
             </div>
-            <span className="text-lg font-black tracking-tighter text-white uppercase italic">
+            <span className="text-lg font-black tracking-normal text-white uppercase italic [word-spacing:0.15em]">
               RC<span className="text-accent">MEGA</span>
             </span>
           </a>
-          <p className="text-muted-foreground text-sm leading-relaxed mb-6 max-w-xs">
+          <p className="text-muted-foreground text-sm leading-relaxed mb-6 max-w-xs [word-spacing:0.1em]">
             The ultimate destination for premium RC hobbyists. From high-speed bashers to technical crawlers, we fuel your passion for control.
           </p>
           <div className="flex items-center gap-4">

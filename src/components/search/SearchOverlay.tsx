@@ -59,7 +59,7 @@ export const SearchOverlay = ({ isOpen, onClose }: SearchOverlayProps) => {
           <div className="container max-w-4xl mx-auto h-full flex flex-col">
             {/* Header */}
             <div className="flex items-center justify-between mb-12">
-              <span className="text-xs font-black text-accent uppercase tracking-[0.4em] italic">Search Showroom</span>
+              <span className="text-xs font-black text-accent uppercase tracking-[0.3em] italic [word-spacing:0.2em]">Search Showroom</span>
               <button onClick={onClose} className="p-3 hover:bg-white/5 rounded-full transition-colors border border-white/5">
                 <X size={24} />
               </button>
@@ -74,7 +74,7 @@ export const SearchOverlay = ({ isOpen, onClose }: SearchOverlayProps) => {
                 placeholder="SEARCH RC MODELS, BRANDS, PARTS..."
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                className="w-full bg-transparent border-none text-3xl md:text-5xl font-black italic uppercase tracking-tighter placeholder:text-white/10 focus:ring-0 pl-12 md:pl-16 pr-4"
+                className="w-full bg-transparent border-none text-xl sm:text-2xl md:text-3xl font-black italic uppercase tracking-normal [word-spacing:0.25em] placeholder:text-white/15 focus:ring-0 pl-12 md:pl-16 pr-4"
               />
               <div className="absolute bottom-0 left-0 w-full h-[1px] bg-white/10 origin-left scale-x-100 transition-transform"></div>
             </div>

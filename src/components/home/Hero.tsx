@@ -2,7 +2,7 @@ import { motion } from 'framer-motion';
 
 export const Hero = () => {
   return (
-    <section className="relative h-screen flex items-center justify-center overflow-hidden">
+    <section className="relative min-h-[600px] md:h-screen flex items-center justify-center overflow-hidden pt-20 md:pt-24 pb-12">
       {/* Background Image with Parallax */}
       <motion.div 
         className="absolute inset-0 z-0"
@@ -26,14 +26,14 @@ export const Hero = () => {
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.8, delay: 0.2 }}
           >
-            <span className="text-accent font-mono text-xs md:text-sm font-bold uppercase tracking-[0.4em] block mb-4">
+            <span className="text-accent font-mono text-xs md:text-sm font-bold uppercase tracking-[0.3em] block mb-3 [word-spacing:0.2em]">
               Performance Engineering
             </span>
-            <h1 className="text-5xl md:text-7xl lg:text-8xl mb-6 leading-tight">
+            <h1 className="text-3xl sm:text-4xl md:text-5xl lg:text-6xl mb-5 leading-tight [word-spacing:0.25em]">
               BUILT FOR THE <br />
               <span className="text-accent italic underline decoration-white/10 underline-offset-8">THRILL</span> OF CONTROL.
             </h1>
-            <p className="text-muted-foreground text-lg md:text-xl mb-10 max-w-2xl leading-relaxed">
+            <p className="text-muted-foreground text-sm sm:text-base md:text-lg mb-8 max-w-2xl leading-relaxed [word-spacing:0.12em]">
               Premium RC vehicles, crawlers, boats, construction machines and performance upgrades for the ultimate enthusiast.
             </p>
             <div className="flex flex-col sm:flex-row gap-4">
