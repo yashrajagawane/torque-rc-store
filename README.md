@@ -1,2 +1,2 @@
 Updated Readme.md
-this is my personal project..
+this is my personal project
