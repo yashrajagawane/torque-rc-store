@@ -6,7 +6,7 @@ as Supabase. Database credentials are server-side only.
 
 ## Requirements
 
-- Node.js compatible with the versions in `package.json`
+- Node.js 22 LTS, version 22.12.0 or newer within major version 22 (see the `engines` field in `package.json`). Vite 8 and the bundled Express server use this runtime target.
 - Bun (the repository includes `bun.lock`)
 - A PostgreSQL database for the API, migrations, and seed scripts
 
@@ -47,7 +47,30 @@ as Supabase. Database credentials are server-side only.
    bun run dev
    ```
 
-`bun run lint` runs `tsc --noEmit`; `bun run build` builds the frontend.
+`bun run lint` runs `tsc --noEmit`; `bun run build` builds the frontend and
+production server bundle.
+
+### Production build and start
+
+Build both the Vite frontend and the Express server bundle with:
+
+```sh
+bun run build
+```
+
+The build writes the browser assets to `dist/` and the Node-compatible ESM
+server bundle to `server.js`. Start the built application with:
+
+```sh
+NODE_ENV=production bun run start
+```
+
+The start script runs `node server.js`; it does not start Vite. Configure the
+deployment host with Node.js 22.12 or newer in major version 22, install the
+locked dependencies, build during deployment, and run the start command. Set
+the required server-side environment variables described below and provide a
+reachable PostgreSQL database. The development command remains `bun run dev`,
+which runs the TypeScript source through `tsx` with Vite middleware.
 
 ## Supabase preparation
 
