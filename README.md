@@ -23,12 +23,11 @@ as Supabase. Database credentials are server-side only.
    settings for local development. `DATABASE_URL`, when set, takes precedence.
 3. Create an empty local database and a database user with the permissions needed
    by the application. Do not point initial setup commands at a production database.
-4. The checked-in publication migration targets an existing catalog schema. This
-   repository has no complete initial schema baseline, so do not run the current
-   migration workflow against a fresh empty database until a reviewed bootstrap
-   baseline and migration history are prepared.
+4. Initialize a genuinely empty, verified local database with the guarded fresh
+   database workflow below. Use the regular migration workflow for existing
+   databases only after their schema and Drizzle history are verified.
 
-5. Seed baseline reference rows, then add the sample catalog if desired:
+5. Seed baseline reference rows, then add the optional sample catalog if desired:
 
    ```sh
    bun run db:seed:reference
@@ -37,7 +36,11 @@ as Supabase. Database credentials are server-side only.
    ```
 
    These seed commands insert missing rows only. Existing rows with the same
-   unique slug are preserved. `seed-unique-products.ts` no longer clears tables.
+   unique slug are preserved. The product seed scripts currently set
+   `IN_STOCK` but omit `stock` and `is_published`; schema defaults leave those
+   sample rows at zero stock and unpublished. They are not sellable demo stock.
+   Do not invent stock counts or publish products automatically; set inventory
+   and publication state deliberately through the owner UI.
 6. Start the development server:
 
    ```sh
@@ -195,8 +198,121 @@ out-of-order events cannot downgrade a paid order. A captured payment whose
 reservation expired or no longer matches is stored in owner-visible payment
 review cases; it is not marked paid or fulfilled. Refunds are not automated:
 the owner must reconcile the payment in Razorpay and arrange any required refund
-manually. These mocked tests do not verify real Razorpay Test Mode, browser
-Checkout, PostgreSQL transaction rollback, or webhook delivery.
+manually. Mocked tests do not verify real Razorpay Test Mode, browser Checkout,
+PostgreSQL transaction rollback, or webhook delivery.
+
+### Opt-in PostgreSQL integration tests
+
+By default, `bun test` remains database-free because the PostgreSQL suite is
+skipped without explicit opt-in. Critical checkout/payment integration
+scenarios are also available separately with `bun run test:postgres`.
+They run only when `RUN_POSTGRES_INTEGRATION_TESTS=true`, a dedicated
+`TEST_DATABASE_URL` points to a database whose name includes a clear `test`
+segment (for example, `rcmega_test`), and
+`POSTGRES_TEST_DATABASE_CONFIRMATION=I_CONFIRM_DISPOSABLE_TEST_DATABASE` is
+set. The URL must include an explicit, non-empty username and password. The
+test pool receives those parsed credentials directly; it does not use
+`PGUSER`, `PGPASSWORD`, or application database credentials as a fallback.
+The guard compares normalized host, port, and database name against every
+configured `DATABASE_URL`, `MIGRATION_DATABASE_URL`, and discrete `SQL_HOST`,
+`SQL_PORT`, `SQL_DB_NAME` target. URL schemes, credentials, and SSL parameters
+do not affect this comparison. Malformed or partial configured targets fail
+closed; no application or migration credentials are used as a fallback.
+`TEST_DATABASE_SSL` accepts `auto`, `true`, or `false` and defaults to `auto`.
+
+Remote test databases are rejected by default. To opt into a remote disposable
+database, also set `ALLOW_REMOTE_TEST_DATABASE=true` and
+`TEST_DATABASE_EXPECTED_FINGERPRINT` to the exact normalized target
+`host:port/database` (IPv6 uses `[address]:port/database`). Independently verify
+the connection host and database name in the provider's database console or
+with a read-only `SELECT current_database(), inet_server_addr(),
+inet_server_port()` connection made by an administrator. Compare that result
+with the connection details and fingerprint before enabling the remote opt-in.
+Do not use a production or shared database, even if its name contains `test`.
+
+The Drizzle migrations `0000` through `0005` are incremental changes, not a
+fresh-database baseline: `0000` and `0003` alter pre-existing catalog/order
+tables. Do not apply them to an empty database. For a genuinely empty,
+disposable integration-test database, use the test-only
+`tests/fixtures/postgres-integration-bootstrap.sql`. It defines the schema
+needed by the integration suite from the current Drizzle schema and migrations
+through `0005`; it is deliberately outside `drizzle/` and is not production
+migration history or a replacement for a reviewed production baseline. Do not
+run Drizzle migrations after this bootstrap. The bootstrap inserts no product,
+customer, category, brand, or order reference data; test cases create their own
+fixtures. It includes empty `users`, `categories`, and `brands` tables to
+preserve the schema's foreign-key relationships.
+
+For an existing database, first independently establish that it is a separate,
+disposable test target and compare its schema to the bootstrap. Do not bootstrap
+over existing objects/data and do not assume migrations `0000` through `0005`
+can bring an arbitrary existing schema to the right state. Reconcile or recreate
+only a disposable database after reviewing its contents. The test command never
+creates a database, applies migrations, truncates tables, or resets data. It
+checks for required tables before inserting fixtures. Each scenario uses unique
+fixture identifiers and removes only its own fixture records. Never use a
+shared, staging, or production database. The database name and confirmation are
+safeguards, not proof that a target is disposable.
+
+Example local Docker setup (commands are instructions; inspect the named
+container before any removal):
+
+```powershell
+docker run --name rcmega-postgres-test `
+  --env POSTGRES_USER=rcmega_test `
+  --env POSTGRES_PASSWORD=REPLACE_WITH_A_NEW_DISPOSABLE_PASSWORD `
+  --env POSTGRES_DB=rcmega_test `
+  --publish 127.0.0.1:55432:5432 `
+  --detach postgres:16
+
+# Bootstrap only this newly created, empty disposable database. psql prompts
+# for the disposable password; do not use a production or application password.
+psql -h 127.0.0.1 -p 55432 -U rcmega_test -d rcmega_test -W `
+  -v ON_ERROR_STOP=1 `
+  -f tests/fixtures/postgres-integration-bootstrap.sql
+
+# Independently verify the actual server target and login identity.
+psql -h 127.0.0.1 -p 55432 -U rcmega_test -d rcmega_test -W `
+  -c "SELECT current_database(), inet_server_addr(), inet_server_port(), current_user;"
+```
+
+Confirm the result is the intended local database (`rcmega_test`, port `55432`,
+the expected loopback server address, and user `rcmega_test`). Compare the
+normalized host, port, and database name to every configured application and
+migration target before enabling tests. Keep the test database distinct from
+`DATABASE_URL`, `MIGRATION_DATABASE_URL`, and `SQL_HOST`/`SQL_PORT`/`SQL_DB_NAME`.
+The local Docker port is bound to loopback (`127.0.0.1`) rather than all network
+interfaces.
+
+Set the required test variables in a dedicated test shell (and both additional
+remote variables only when necessary; do not place live or production
+credentials in a test environment), then run `bun run test:postgres`. For this
+local example, set `TEST_DATABASE_URL` to
+`postgresql://rcmega_test:<URL-ENCODED-DISPOSABLE-PASSWORD>@127.0.0.1:55432/rcmega_test`,
+`RUN_POSTGRES_INTEGRATION_TESTS=true`,
+`POSTGRES_TEST_DATABASE_CONFIRMATION=I_CONFIRM_DISPOSABLE_TEST_DATABASE`, and
+`TEST_DATABASE_SSL=false`. The username and password in the URL must both be
+explicit and non-empty. Do not use `PGUSER`/`PGPASSWORD` as substitutes. Leave
+remote-target settings unset for local testing. Run the independent target query
+above before running the test command.
+
+After testing, independently confirm that `rcmega-postgres-test` is the
+disposable test container, then remove only that container and its attached
+anonymous volume:
+
+```powershell
+docker stop rcmega-postgres-test
+docker rm --volumes rcmega-postgres-test
+```
+
+Do not use broad Docker prune commands for cleanup. The suite uses mocked
+Razorpay API responses and signatures but real PostgreSQL transactions and
+concurrent HTTP requests. It covers last-unit
+checkout contention, payment verification racing with webhook settlement,
+duplicate webhook delivery, reservation expiry, and rollback on failed stock
+consumption. A successful run is evidence for that prepared test database and
+PostgreSQL version only; it is not live Razorpay, production-database, or
+browser Checkout validation.
 
 Configure only Razorpay **Test Mode** credentials: `RAZORPAY_KEY_ID` must begin
 with `rzp_test_`, and `RAZORPAY_KEY_SECRET` and `RAZORPAY_WEBHOOK_SECRET` remain
@@ -228,21 +344,23 @@ Migration `0003_checkout-orders.sql` is additive and has not been applied. It
 preserves old order and item rows, adds UUID ownership/idempotency and subtotal,
 shipping, currency, and fulfillment fields, and adds item name/slug snapshots.
 It assumes the existing `orders`, `order_items`, and `products` tables already
-exist. This repository still has no complete bootstrap baseline, so do not apply
-it to an empty database or a live database until the schema and Drizzle migration
-history are reconciled against a backup/staging copy. Historic orders remain
-visible to the owner; linking them to customer accounts requires a separately
-verified mapping, not an inferred migration.
+exist. The separate fresh-database baseline already represents the current
+schema through `0005`; do not replay this legacy migration after initializing
+with that baseline. For an existing database, reconcile schema and migration
+history against a backup/staging copy before applying anything. Historic orders
+remain visible to the owner; linking them to customer accounts requires a
+separately verified mapping, not an inferred migration.
 
 Migration `0004_inventory-reservations.sql` adds a separate reservation table
 and constraints/indexes; it does not rewrite product quantities, carts or
 existing orders. Existing unpaid orders receive no reservation because their
 current payment status or age cannot safely establish inventory ownership. Before
 deploying a future payment flow, reconcile any legacy unpaid orders and confirm
-that the migration baseline includes `orders` and `products`. For a fresh
-database, first apply the project's complete reviewed baseline and migrations
-`0000` through `0003`, then `0004`; `0004` alone is not a database initializer.
-Review and test against a backup/staging database before applying anywhere.
+that the existing database includes `orders` and `products`. The fresh
+application baseline already includes reservations and payment tables through
+`0005`; do not replay `0004` on a fresh-baseline database. Review and test
+existing-database migrations against a backup/staging copy before applying
+anywhere.
 
 Migration `0005_razorpay-test-payments.sql` adds nullable Razorpay IDs and a
 creation-state field to orders, plus webhook-event deduplication and owner-visible
@@ -264,6 +382,12 @@ baseline; do not apply it to production without a reviewed backup/staging run.
 | `SQL_PASSWORD` | Required if no `DATABASE_URL` | Runtime PostgreSQL password. |
 | `SQL_ADMIN_USER` | Optional legacy migration setting | Migration user when using discrete `SQL_*` settings. Must be paired with `SQL_ADMIN_PASSWORD`. |
 | `SQL_ADMIN_PASSWORD` | Optional legacy migration setting | Migration password when using discrete `SQL_*` settings. Prefer `MIGRATION_DATABASE_URL` for a separate role. |
+| `FRESH_DATABASE_URL` | Required only for fresh initialization | Dedicated target with explicit credentials; never falls back to app or migration credentials. |
+| `FRESH_DATABASE_EXPECTED_FINGERPRINT` | Required only for fresh initialization | Exact normalized `host:port/database` target identity. |
+| `FRESH_DATABASE_ENABLED` | Required only for fresh initialization | Must equal `true`, together with the exact confirmation value and explicit CLI flag. |
+| `FRESH_DATABASE_CONFIRMATION` | Required only for fresh initialization | Must equal `I_CONFIRM_EMPTY_NONPRODUCTION_DATABASE`. |
+| `FRESH_DATABASE_SSL` | Optional | `auto`, `true`, or `false`; remote targets use SSL in `auto` mode. |
+| `ALLOW_REMOTE_FRESH_DATABASE` | Optional | Must equal `true` plus a matching fingerprint to allow a remote staging target. |
 | `PORT` | Optional | Express listening port; defaults to `3000`. |
 | `SHIPPING_FLAT_RATE_INR` | Optional | Express checkout shipping charge in INR; defaults to `0.00` (free shipping). |
 | `RAZORPAY_KEY_ID` | Required for Test Mode checkout | Test Mode public key ID; must use the `rzp_test_` prefix. Never use a live key in this task. |
@@ -287,9 +411,9 @@ overriding the runtime user/password).
 - Apply pending migrations only to an explicitly selected database:
   `bun run db:migrate`.
 
-For a **new empty database**, the checked-in publication migration is not a full
-schema baseline. Prepare and review a bootstrap migration and migration history
-before using `db:migrate` or running seeds.
+For a **new empty database**, use the separate full application baseline and
+guarded initializer described below. Do not apply the legacy incremental
+`0000`–`0005` migrations directly to an empty database.
 
 The checked-in `0000_products-publication-status.sql` is a targeted migration for
 the existing catalog schema, not a fresh-database baseline. Review it and confirm
@@ -301,13 +425,89 @@ rows start as drafts. This migration has not been applied to any database.
 For an **existing database with data**, do not apply a newly generated initial
 migration blindly. First compare the live schema to `src/db/schema.ts`, prepare a
 baseline that matches the existing database, and test the migration plan against
-a backup/staging copy. This repository does not include a generated baseline or
-any applied migration history yet. No migration is run automatically on app
+a backup/staging copy. The fresh-database baseline is not a baseline for an
+existing database, and the repository does not establish the applied migration
+history of any external database. No migration is run automatically on app
 startup.
 
 The migration command can modify the database selected by its environment
 variables. Verify the target and credentials before every `db:migrate` invocation.
-This project has not applied migrations to Supabase or any production database.
+
+### Fresh application database initialization
+
+The `drizzle/0000`–`0005` files remain the legacy incremental history. They alter
+tables that must already exist; they are not a fresh database initializer. The
+full baseline is generated from `src/db/schema.ts` into `drizzle/fresh/`. It
+contains the complete application schema and no sample rows or credentials.
+The integration-test bootstrap in `tests/fixtures/` remains a smaller test-only
+schema and is not used by this workflow.
+
+Generate and review the baseline once for this schema version (file generation
+only; this does not connect to PostgreSQL):
+
+```sh
+bun run db:baseline:generate
+bun run db:check
+```
+
+After committing and using this baseline, keep it immutable. Do not regenerate
+it for routine schema changes; generate those as new entries in the normal
+`drizzle/` migration history with `bun run db:generate`. The initializer accepts
+only the single reviewed baseline entry and fails before creating a database
+pool if its journal is changed.
+
+Create a new, empty, non-production database separately. Configure a dedicated
+`FRESH_DATABASE_URL` with explicit credentials and its exact normalized target
+fingerprint. The target must differ from all configured application and
+migration database targets. The initializer rejects non-empty databases and
+requires an environment opt-in, an explicit confirmation value, and a command
+flag. Remote targets are denied by default. A remote staging target additionally
+requires `ALLOW_REMOTE_FRESH_DATABASE=true` and an independently checked
+fingerprint. Confirmation and fingerprints are safeguards, not proof that a
+database is disposable.
+
+Example local PowerShell setup for a database created separately on loopback
+port `55432` (replace placeholders locally; never commit credentials):
+
+```powershell
+$env:FRESH_DATABASE_URL = 'postgresql://fresh_user:<URL-ENCODED-PASSWORD>@127.0.0.1:55432/rcmega_fresh'
+$env:FRESH_DATABASE_EXPECTED_FINGERPRINT = 'localhost:55432/rcmega_fresh'
+$env:FRESH_DATABASE_ENABLED = 'true'
+$env:FRESH_DATABASE_CONFIRMATION = 'I_CONFIRM_EMPTY_NONPRODUCTION_DATABASE'
+$env:FRESH_DATABASE_SSL = 'false'
+bun run db:init:fresh -- --confirm-empty-database
+```
+
+The command validates URL syntax, explicit credentials, fingerprint and
+collisions before opening a connection. It then verifies the connected database
+name and user, and confirms there are no user relations before applying the
+baseline. The fingerprint verifies the client connection host, port and database
+before connecting. The initializer does not compare `inet_server_port()` with
+the URL port: with a Docker mapping such as `127.0.0.1:55433:5432`, the host
+connection uses port `55433` while PostgreSQL correctly reports its internal
+port `5432`. It uses only `FRESH_DATABASE_URL`; there is no fallback to
+`DATABASE_URL`, `MIGRATION_DATABASE_URL` or `SQL_*` credentials. The baseline is
+recorded through Drizzle's normal migrator in the same
+`drizzle.__drizzle_migrations` table. The installed PostgreSQL migrator compares
+the latest recorded migration timestamp with journal entries. The fresh
+baseline timestamp is later than legacy `0005`, so the regular migration
+workflow skips `0000`–`0005` on a freshly initialized database and applies only
+subsequent migrations. Existing migration files and journal entries are not
+changed. New migrations must have a later timestamp; verify this with
+`bun run db:check` and a disposable PostgreSQL proof-of-concept before adoption.
+
+After initialization, configure the runtime to use that database deliberately;
+apply later reviewed migrations with `bun run db:migrate`. Never run the fresh
+initializer against an existing database. For an existing database, inspect
+and back it up, compare its schema and migration history, then use only the
+verified legacy migration path. Documentation alone is not evidence that a
+production database is safe to baseline.
+
+Reference rows are optional for schema creation. Local sample products depend
+on the reference-data seed creating expected brand and category slugs. Seeds
+are separate from initialization and do not replace matching rows. Do not run
+sample product seeds automatically in staging; they currently remain drafts
+with zero stock despite their `IN_STOCK` availability field.
 
 ## Safe catalog scripts
 
