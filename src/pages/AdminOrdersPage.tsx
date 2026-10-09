@@ -93,9 +93,9 @@ export function AdminOrdersPage() {
     <div className="container px-4 md:px-6 max-w-7xl">
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-5 mb-8 border-b border-white/10 pb-6">
         <div><p className="text-accent font-mono text-xs font-bold uppercase tracking-[0.3em] mb-2">Owner Console</p><h1 className="text-3xl md:text-4xl italic">ORDER MANAGEMENT</h1></div>
-        <Link to="/admin" className="btn-secondary px-4 py-3 text-xs">PRODUCTS</Link>
+        <div className="flex flex-wrap gap-2"><Link to="/admin" className="btn-secondary px-4 py-3 text-xs">PRODUCTS</Link><Link to="/admin/inquiries" className="btn-secondary px-4 py-3 text-xs">INQUIRIES</Link></div>
       </div>
-      <div className="flex gap-5 mb-6 text-xs font-bold uppercase tracking-widest"><Link to="/admin" className="text-muted-foreground hover:text-white">Products</Link><span className="text-accent">Orders</span></div>
+      <nav aria-label="Admin sections" className="flex flex-wrap gap-5 mb-6 text-xs font-bold uppercase tracking-widest"><Link to="/admin" className="text-muted-foreground hover:text-white">Products</Link><span className="text-accent">Orders</span><Link to="/admin/inquiries" className="text-muted-foreground hover:text-white">Inquiries</Link></nav>
       {error && <p role="alert" className="mb-5 border border-red-500/30 bg-red-500/5 p-4 text-sm text-red-300">{error}</p>}
       {notice && <p role="status" className="mb-5 border border-emerald-500/30 bg-emerald-500/5 p-4 text-sm text-emerald-300">{notice}</p>}
       {reviewCases.length > 0 && <section className="glass-card mb-6 border border-amber-500/30 p-5" aria-labelledby="payment-review-heading">

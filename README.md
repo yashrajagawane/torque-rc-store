@@ -162,8 +162,9 @@ For owner image uploads, create a public Supabase Storage bucket (default name
 and `SUPABASE_STORAGE_BUCKET` only in the Express server environment. The bucket
 must be public so the storefront can render its returned image URLs; writes still
 go through the owner-protected server endpoint. Uploads accept JPEG, PNG, WebP,
-and AVIF up to 8 MiB. Do not put the service-role/secret key in any `VITE_*`
-variable or client bundle.
+and AVIF up to 4 MiB so the raw request remains below Vercel Functions' 4.5 MB
+request-body limit. The admin page rejects larger files before upload. Do not
+put the service-role/secret key in any `VITE_*` variable or client bundle.
 
 ## Checkout and orders
 
@@ -259,7 +260,7 @@ tables. Do not apply them to an empty database. For a genuinely empty,
 disposable integration-test database, use the test-only
 `tests/fixtures/postgres-integration-bootstrap.sql`. It defines the schema
 needed by the integration suite from the current Drizzle schema and migrations
-through `0005`; it is deliberately outside `drizzle/` and is not production
+through `0006`; it is deliberately outside `drizzle/` and is not production
 migration history or a replacement for a reviewed production baseline. Do not
 run Drizzle migrations after this bootstrap. The bootstrap inserts no product,
 customer, category, brand, or order reference data; test cases create their own
@@ -460,24 +461,22 @@ variables. Verify the target and credentials before every `db:migrate` invocatio
 
 The `drizzle/0000`–`0005` files remain the legacy incremental history. They alter
 tables that must already exist; they are not a fresh database initializer. The
-full baseline is generated from `src/db/schema.ts` into `drizzle/fresh/`. It
-contains the complete application schema and no sample rows or credentials.
-The integration-test bootstrap in `tests/fixtures/` remains a smaller test-only
-schema and is not used by this workflow.
+checked-in `drizzle/fresh/0000_application-baseline.sql` is the immutable fresh
+baseline as of the schema through `0005`. It deliberately does not include later
+tables such as `contact_inquiries`, which are created by forward migrations.
+The test-only bootstrap in `tests/fixtures/` is separate and includes the schema
+through `0006`; it is never used by the fresh initializer or production migration
+history.
 
-Generate and review the baseline once for this schema version (file generation
-only; this does not connect to PostgreSQL):
-
-```sh
-bun run db:baseline:generate
-bun run db:check
-```
-
-After committing and using this baseline, keep it immutable. Do not regenerate
-it for routine schema changes; generate those as new entries in the normal
-`drizzle/` migration history with `bun run db:generate`. The initializer accepts
-only the single reviewed baseline entry and fails before creating a database
-pool if its journal is changed.
+For a fresh database, run the guarded initializer to apply the baseline, then
+run `bun run db:migrate` against that same explicitly verified database. The
+normal workflow skips `0000`–`0005` using the baseline timestamp and applies
+later forward migrations, including `0006_contact-inquiries`. Keep the baseline
+SQL, snapshot, and one-entry journal immutable. Routine schema changes must be
+new entries in the normal `drizzle/` migration history using
+`bun run db:generate`; do not regenerate or replace the fresh baseline for an
+ordinary feature migration. The initializer requires exactly its reviewed
+single baseline journal entry and fails closed if that journal changes.
 
 Create a new, empty, non-production database separately. Configure a dedicated
 `FRESH_DATABASE_URL` with explicit credentials and its exact normalized target
@@ -520,7 +519,10 @@ changed. New migrations must have a later timestamp; verify this with
 `bun run db:check` and a disposable PostgreSQL proof-of-concept before adoption.
 
 After initialization, configure the runtime to use that database deliberately;
-apply later reviewed migrations with `bun run db:migrate`. Never run the fresh
+apply later reviewed migrations with `bun run db:migrate`. The baseline represents
+the schema through legacy migration `0005`; run the normal migration workflow
+after initialization to apply forward migrations such as `0006_contact-inquiries`.
+Never run the fresh
 initializer against an existing database. For an existing database, inspect
 and back it up, compare its schema and migration history, then use only the
 verified legacy migration path. Documentation alone is not evidence that a
@@ -556,5 +558,141 @@ a way to update a live catalog.
 
 The app has public catalog read APIs, Supabase customer authentication, a
 protected customer account endpoint, server-side owner authorization, and an
-owner product dashboard with draft/publish controls. Checkout, order management,
-payments, and persisted contact submissions are not implemented.
+owner dashboard for products, orders, payment-review cases, and saved contact
+inquiries. Contact submissions are stored in PostgreSQL and visible only through
+the owner-protected inbox. No automatic email confirmation or reply is sent.
+Checkout and Test Mode payment flows are implemented; live payment processing is
+not enabled.
+
+### Contact inquiries
+
+The public contact form saves validated submissions to `contact_inquiries` via
+`POST /api/contact-inquiries`. The owner inbox is available at `/admin/inquiries`
+and its API requires a verified Supabase owner session. A successful form
+confirmation means the database insert completed; it does not mean an email was
+sent. Submissions are rate-limited in process by the Express instance. This
+limiter resets when the process restarts and is not shared across multiple app
+instances; deployments with multiple instances should add a shared rate limiter
+before exposing the form broadly. Establish an appropriate retention policy for
+the personal contact data stored with inquiries.
+
+## Vercel staging deployment
+
+The app supports Vercel's Express Function model through the exported Express application in `server.ts`. Vercel invokes the app as a Function; it does not start the standalone `node server.js` listener. The ordinary `bun run build` and `bun run start` workflow remains available for standalone Node hosting. Vercel uses `bun run build:vercel`, which builds the Vite frontend and copies its output into the generated `public/` directory without producing the standalone `server.js` bundle. This leaves `server.ts` as the single Express Function entry point. Vercel serves `public/` files from its static delivery layer; Express's `express.static()` is disabled in the Vercel runtime. The Express catch-all returns the included `public/index.html` for client-side routes. API routes remain in Express, and the Razorpay webhook raw-body parser remains registered before `express.json()`.
+
+Use a dedicated Vercel staging project or explicitly approved Preview deployment. Configure Preview variables separately in Vercel; do not copy Production values. Use the Vercel-provided preview hostname and leave the `.tech` DNS and production domain untouched. Verify HTTPS, certificate validity, HTTP-to-HTTPS behavior, SPA refreshes, API calls, and Supabase Auth redirect allowlists on the actual preview hostname. The staging frontend and API are same-origin.
+
+| Variable | Scope | Staging purpose |
+| --- | --- | --- |
+| `DATABASE_URL` | Server only | Dedicated staging Supabase PostgreSQL URL, never Production. |
+| `DATABASE_SSL` | Server only | Set `true` for remote Supabase connections. |
+| `VITE_SUPABASE_URL` | Browser bundle | Staging Supabase project URL. |
+| `VITE_SUPABASE_ANON_KEY` | Browser bundle | Staging publishable/anon key only. |
+| `SUPABASE_URL` | Server only | Same staging project for token verification and Storage. |
+| `SUPABASE_ANON_KEY` | Server only | Non-privileged key for server Auth verification. |
+| `SUPABASE_SERVICE_ROLE_KEY` | Server only | Optional Storage upload key; never use a `VITE_` prefix. |
+| `SUPABASE_STORAGE_BUCKET` | Server only | Public image bucket configured in the staging project. |
+| `ADMIN_EMAILS` | Server only | Verified staging owner account email(s). |
+| `RAZORPAY_KEY_ID` | Checkout/public key response | Test Mode key only; must begin `rzp_test_`. |
+| `RAZORPAY_KEY_SECRET` | Server only | Razorpay Test Mode API secret. |
+| `RAZORPAY_WEBHOOK_SECRET` | Server only | Secret configured for the matching Test Mode webhook. |
+| `SHIPPING_FLAT_RATE_INR` | Server only | Optional staging shipping price. |
+| `CRON_SECRET` | Server only | Independent random secret of at least 32 characters for scheduled cleanup. |
+
+`PORT`, `NODE_ENV`, and `VERCEL` are runtime/platform values. Do not add database, service-role, Razorpay, webhook, or cron secrets to Vite variables. `.env.example` contains placeholders only.
+
+### Vercel database connection considerations
+
+The app uses Drizzle with `drizzle-orm/node-postgres` and `pg` (`Pool`), not `postgres.js`. Checkout, settlement, reservation, and rollback paths use explicit transactions and row locks. Supabase documents a `postgres.js` query-pipelining incompatibility with shared transaction pooling; that specific warning does not apply to this adapter. The Vercel runtime pool is bounded to one connection per warm Function instance, with a 5-second connection timeout; standalone Node retains a pool size of 10. Remote SSL defaults on; set `DATABASE_SSL=true` in Preview.
+
+Copy the connection settings from the dedicated staging project's Supabase Connect dialog. Supabase's shared transaction pooler is IPv4 reachable and uses port 6543; direct Free-plan connections may be IPv6-only. Use the exact dashboard endpoint, do not guess it. Verify transaction and row-lock scenarios against the staging project before relying on its pooler semantics. Keep migration DDL credentials separate from runtime credentials where practical, and never configure Production URLs in Preview.
+
+### Staging database initialization gate
+
+No Supabase project was connected or migrated as part of this setup. The fresh initializer counts relations outside PostgreSQL system schemas; a managed Supabase project contains platform-managed relations and will normally be rejected as non-empty. Do not bypass that guard. Legacy migrations `0000`–`0005` assume the original application tables already exist and are not a blank-database chain. Before initializing Supabase staging, independently verify its project reference and database identity, inspect `public` and `drizzle` for application objects/history, and approve a Supabase-compatible baseline path. If the initializer rejects managed objects, stop and prepare a reviewed Supabase-aware initializer that checks conflicting application tables/history without changing managed schemas. Do not apply migrations until this prerequisite is resolved. Never import Production customer, order, inventory, or inquiry data into staging.
+
+After the target is verified and the appropriate baseline is approved, migrate only that staging target and inspect the schema/history. Expected history is a baseline through `0005`, followed by `0006_contact-inquiries` exactly once. Do not rerun migrations to force a partial result to pass.
+
+#### Guarded Supabase staging commands
+
+`bun run db:init:fresh` remains the generic initializer for a relation-empty, verified non-production PostgreSQL database. It has not been changed to ignore Supabase platform relations. The Supabase-specific commands use a separate guard and must only target a newly created, dedicated staging project after its project reference and connection details have been independently checked in the Supabase Dashboard. These commands are not approved for Production.
+
+Before using either command, obtain the exact host, port, database, and username from the dedicated staging project's **Connect** dialog. Do not construct a pooler hostname from its region. The direct host embeds the project reference; the shared pooler hostname is shared across projects, so the shared-pooler username must carry the expected staging project reference. A URL fingerprint is a mistake-prevention safeguard, not proof that a project is disposable. Never put credentials in source files, `.env.example`, chat, or logs.
+
+Required environment names:
+
+| Variable | Purpose |
+|---|---|
+| `SUPABASE_STAGING_ENABLED` | Explicit opt-in; exact value `true`. |
+| `SUPABASE_STAGING_PROJECT_REF` | Owner-verified staging project reference. |
+| `SUPABASE_PRODUCTION_PROJECT_REF` | Owner-verified Production project reference; must differ from staging. |
+| `SUPABASE_STAGING_DATABASE_URL` | Explicit staging-only migration URL with username/password and SSL required. |
+| `SUPABASE_STAGING_DATABASE_HOST` | Exact host copied from the staging Connect dialog. |
+| `SUPABASE_STAGING_DATABASE_PORT` | Exact port copied from that connection mode. |
+| `SUPABASE_STAGING_DATABASE_NAME` | Expected connected database name. |
+| `SUPABASE_STAGING_DATABASE_USER` | Expected connected role; shared-pooler usernames include the project reference. |
+| `SUPABASE_STAGING_DATABASE_EFFECTIVE_USER` | Expected PostgreSQL `current_user` after connection; set independently because a shared-pooler login name may differ from the database role. |
+| `SUPABASE_STAGING_SCHEMA` | Must be `public` for the current unqualified baseline SQL. |
+| `SUPABASE_STAGING_TARGET_FINGERPRINT` | Exact normalized `host:port/database/user` confirmation value. |
+| `SUPABASE_STAGING_INITIALIZATION_CONFIRMATION` | Must equal `I_CONFIRM_NEW_SUPABASE_STAGING_SCHEMA` for baseline initialization. |
+| `SUPABASE_STAGING_MIGRATION_CONFIRMATION` | Must equal `I_CONFIRM_SUPABASE_STAGING_MIGRATION` for forward migrations. |
+
+Do not set generic `DATABASE_URL`, `MIGRATION_DATABASE_URL`, `FRESH_DATABASE_URL`, or discrete `SQL_*` settings to the same target when invoking these commands. The staging scripts use only `SUPABASE_STAGING_DATABASE_URL` and fail on configured target collisions or uncomparable targets. Each command validates target identity again. The PostgreSQL server's internal port is not compared to the host/pooler URL port. The connection explicitly starts with `search_path=public` and verifies `current_schema()` and the effective path before schema operations.
+
+For a new, verified staging project, the intended order is:
+
+1. `bun run db:init:supabase-staging -- --confirm-staging-initialize` applies the immutable fresh baseline through `0005`, then verifies the baseline history marker and application objects.
+2. `bun run db:migrate:supabase-staging -- --confirm-staging-migrate` validates the baseline and any known forward-history prefix, then applies pending migrations using Drizzle's normal `drizzle.__drizzle_migrations` history table. The current expected next migration is `0006_contact-inquiries`, once. Later migrations must retain timestamps later than their predecessors.
+3. Independently verify the schema and history before configuring the Vercel Preview runtime.
+
+The scripts reject conflicting `public` objects, any existing Drizzle schema/history at baseline initialization, inconsistent Drizzle records, and a present `supabase_migrations` schema. Any such target requires manual review; do not retry after a partial failure or repair history by manually inserting rows. The initializer only reads catalog information before applying the baseline, and its baseline SQL does not modify Supabase-managed schemas. Platform extension-owned objects in `public` are allowed; other non-extension objects fail closed. Do not run Supabase CLI `db push` against this application database: Drizzle is the current migration authority, and Supabase CLI maintains a separate history table.
+
+These safeguards do not establish a target as safe by themselves. Before the first hosted schema mutation, independently confirm the project reference in the Dashboard, verify that it is distinct from Production, inspect the application schema/history read-only, establish a staging-only backup/recovery path, and have a second reviewer verify the target. If a command fails after connection or leaves migration metadata, stop for manual inspection; do not rerun until the actual schema and history are reconciled.
+
+The staging runner's real PostgreSQL operations can be exercised locally without
+using the Supabase CLI guard. This is a separate, opt-in test-only injection and
+is not available through either staging command. It accepts only a dedicated
+database named `rcmega_staging_runner_test` on `127.0.0.1:55434`, requires an
+explicit disposable-database confirmation, and refuses configured application
+target collisions. Create a new disposable local database; do not reuse a
+Supabase target. Set `RUN_SUPABASE_STAGING_PG_TESTS=true`,
+`SUPABASE_STAGING_PG_TEST_CONFIRMATION=I_CONFIRM_LOCAL_DISPOSABLE_POSTGRES`,
+and `SUPABASE_STAGING_PG_TEST_DATABASE_URL` for that local database, then run
+`bun run test:supabase-staging-postgres`. With opt-in absent, ordinary `bun test`
+skips this suite without opening a connection. The integration test applies the
+actual baseline and forward migrations, so use only a newly created disposable
+database and remove only the resources created for that test afterward.
+
+The application tables are in `public`. Current browser code uses Supabase Auth, while catalog, cart, customer orders, contact inquiries, and administration use Express APIs; no browser-side `supabase.from(...)` table access was found. The baseline does not enable RLS. Supabase documents that SQL-created `public` tables can be reachable through its Data API, so before staging is exposed, separately decide and verify whether to enable RLS without browser-access policies or remove `public` from Data API exposure. Do not add blanket policies: carts, orders, inquiries, and payment records must not be exposed. This task does not change RLS or grants.
+
+### Health and readiness
+
+`GET /api/health` is a lightweight liveness response and does not access the database. `GET /api/ready` runs a read-only `SELECT 1` through the shared pool, with a 3-second query timeout and bounded connection timeout. It returns only a generic 503 on failure. Neither route runs writes, migrations, seeds, or cleanup. Local tests do not prove staging connectivity.
+
+### Reservation cleanup scheduling
+
+`POST /api/internal/reservations/expire` is protected by a constant-time-checked `Authorization: Bearer <CRON_SECRET>` token. It calls the existing transactional/idempotent expiry helper, accepts no database target or caller-supplied cleanup parameters, and returns only an aggregate count. Missing secret configuration fails closed. Keep the secret in the Vercel Preview server environment and configure an external scheduler to invoke the endpoint over HTTPS every 1–5 minutes. Never place the secret in a URL, client bundle, or scheduler logs.
+
+Do not configure this as a Vercel Hobby Cron: Hobby supports only once-daily schedules, potentially any time within the selected hour, while reservations expire after 20 minutes. Expired reservations are excluded from available-stock calculations using PostgreSQL wall-clock time, and payment settlement refuses expired reservations, so delayed housekeeping does not make expired stock unavailable forever or allow late fulfillment. Expired unpaid order rows can remain pending until cleanup, however, so daily cleanup is operationally too slow. Use an external scheduler with a 1–5-minute cadence or a plan supporting that frequency. The actual plan and scheduler are not configured yet.
+
+### Backup and restore runbook
+
+The staging Supabase plan has not been independently verified. Current Supabase documentation states automatic daily database backups are available on Pro, Team, and Enterprise; Free projects are advised to make regular CLI exports and maintain off-site backups. Database backups do not include Storage API objects. Do not assume Free includes daily backups.
+
+For staging-only logical backups, use Supabase CLI `db dump` with the verified staging project or PostgreSQL-native tools with an approved connection mode. The Supabase CLI excludes managed schemas by default and requires Docker. Keep files outside the repository/deployment artifact, encrypt with an approved key before off-site transfer, restrict access, and verify checksums. Example placeholders only:
+
+```sh
+supabase db dump --db-url "$STAGING_DATABASE_URL" -f /secure-backups/rcmega-staging-schema.sql
+supabase db dump --db-url "$STAGING_DATABASE_URL" -f /secure-backups/rcmega-staging-data.sql --use-copy --data-only
+```
+
+Restore only into a separate disposable target, never over the source. Validate application tables, constraints, indexes, Drizzle history, products, inventory reservations, orders/order items, payment-review cases, and contact inquiries. Plan downtime, recovery-point/time objectives, access controls, and ownership. Storage objects need a separate backup plan. No backup or restore drill was performed for this task.
+
+Official platform references for this deployment section:
+- [Express on Vercel](https://vercel.com/docs/frameworks/backend/express)
+- [Vercel Cron Jobs](https://vercel.com/docs/cron-jobs/manage-cron-jobs)
+- [Supabase PostgreSQL connections](https://supabase.com/docs/guides/database/connecting-to-postgres)
+- [Supabase Postgres.js compatibility](https://supabase.com/docs/guides/database/postgres-js)
+- [Supabase database backups](https://supabase.com/docs/guides/platform/backups)
+
+For Vercel, set the project Function/Build Node.js version to `22.x`, matching the supported major in `package.json` (`>=22.12.0 <23`). Vercel detects the checked-in `bun.lock` for installation; the deployed Express Function itself uses Vercel's Node.js runtime.

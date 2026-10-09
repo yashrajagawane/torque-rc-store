@@ -15,8 +15,10 @@ export const createPool = () => {
       ? {
           connectionString: settings.url,
           ssl: settings.ssl,
-          max: 10,
-          connectionTimeoutMillis: 15000,
+          // Supabase transaction pooling is intended for serverless clients.
+          // Keep a single connection per warm Vercel Function instance.
+          max: process.env.VERCEL === '1' ? 1 : 10,
+          connectionTimeoutMillis: process.env.VERCEL === '1' ? 5000 : 15000,
         }
       : {
           host: settings.host,
@@ -25,13 +27,13 @@ export const createPool = () => {
           user: settings.user,
           password: settings.password,
           ssl: settings.ssl,
-          max: 10,
-          connectionTimeoutMillis: 15000,
+          max: process.env.VERCEL === '1' ? 1 : 10,
+          connectionTimeoutMillis: process.env.VERCEL === '1' ? 5000 : 15000,
         };
     global._postgresPool = new Pool(poolConfig);
 
-    global._postgresPool.on('error', (err) => {
-      console.error('Unexpected error on idle SQL pool client:', err);
+    global._postgresPool.on('error', () => {
+      console.error('Unexpected error on idle SQL pool client.');
     });
   }
   return global._postgresPool;

@@ -6,12 +6,13 @@ export type PostgresFixtureScope = {
   cartUserIds: string[];
   paymentIds: string[];
   eventIds: string[];
+  contactEmails: string[];
 };
 
 export function createPostgresFixtureScope(): PostgresFixtureScope {
   return {
     productIds: [], productSlugs: [], orderIds: [], orderCustomerAuthIds: [],
-    cartUserIds: [], paymentIds: [], eventIds: [],
+    cartUserIds: [], paymentIds: [], eventIds: [], contactEmails: [],
   };
 }
 

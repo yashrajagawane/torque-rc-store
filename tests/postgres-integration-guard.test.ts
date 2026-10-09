@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { initializePostgresIntegrationPool, postgresTargetFingerprint, resolvePostgresIntegrationSettings } from './postgres-integration-guard.ts';
+import { initializePostgresIntegrationPool, postgresTargetFingerprint, resolvePostgresIntegrationOptIn, resolvePostgresIntegrationSettings } from './postgres-integration-guard.ts';
 import { createPostgresFixtureScope, withPostgresFixtureCleanup } from './postgres-fixture-scope.ts';
 
 const base = {
@@ -10,6 +10,19 @@ const base = {
 };
 
 describe('PostgreSQL integration test safety gate', () => {
+  it('skips the integration suite when opt-in is absent and fails closed for invalid explicit opt-in', () => {
+    assert.equal(resolvePostgresIntegrationOptIn({}), null);
+    assert.equal(resolvePostgresIntegrationOptIn({ RUN_POSTGRES_INTEGRATION_TESTS: undefined }), null);
+    assert.throws(() => resolvePostgresIntegrationOptIn({ RUN_POSTGRES_INTEGRATION_TESTS: 'false' }), /must equal true/);
+    assert.throws(() => resolvePostgresIntegrationOptIn({ RUN_POSTGRES_INTEGRATION_TESTS: 'true' }), /confirmation/);
+    assert.throws(() => resolvePostgresIntegrationOptIn({
+      RUN_POSTGRES_INTEGRATION_TESTS: 'true',
+      POSTGRES_TEST_DATABASE_CONFIRMATION: base.POSTGRES_TEST_DATABASE_CONFIRMATION,
+      TEST_DATABASE_URL: 'postgresql://test_user:test_password@localhost:5432/rcmega_test',
+      DATABASE_URL: 'postgresql://app:password@localhost:5432/rcmega_test',
+    }), /must differ/);
+  });
+
   it('requires explicit opt-in and never falls back to application credentials', () => {
     assert.throws(() => resolvePostgresIntegrationSettings({ ...base, RUN_POSTGRES_INTEGRATION_TESTS: undefined, DATABASE_URL: base.TEST_DATABASE_URL }), /opt in/);
     assert.throws(() => resolvePostgresIntegrationSettings({ ...base, TEST_DATABASE_URL: undefined, DATABASE_URL: base.TEST_DATABASE_URL }), /TEST_DATABASE_URL/);

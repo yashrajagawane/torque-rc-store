@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { ImagePlus, PackagePlus, Pencil, Search, Upload, X } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
+import { isProductImageWithinUploadLimit } from '../lib/product-upload';
 
 interface Option { id: number; name: string }
 interface Product {
@@ -203,6 +204,10 @@ export function AdminProductsPage() {
 
   async function uploadImages(files: FileList | null) {
     if (!files?.length) return;
+    if (Array.from(files).some((file) => !isProductImageWithinUploadLimit(file.size))) {
+      setFormError('Each image must be 4 MiB or smaller.');
+      return;
+    }
     setUploading(true);
     setFormError('');
     try {
@@ -235,7 +240,10 @@ export function AdminProductsPage() {
             <p className="text-sm text-muted-foreground mt-2">Manage catalog details, images and publication status.</p>
           </div>
           <div className="flex gap-3">
-            <Link to="/admin/orders" className="btn-secondary px-5 py-3 text-xs">ORDERS</Link>
+            <div className="flex flex-wrap gap-2">
+              <Link to="/admin/orders" className="btn-secondary px-5 py-3 text-xs">ORDERS</Link>
+              <Link to="/admin/inquiries" className="btn-secondary px-5 py-3 text-xs">INQUIRIES</Link>
+            </div>
             <button onClick={beginCreate} className="btn-primary px-5 py-3 text-xs"><span className="skew-x-[10deg] flex gap-2 items-center"><PackagePlus size={16} /> ADD PRODUCT</span></button>
           </div>
         </div>

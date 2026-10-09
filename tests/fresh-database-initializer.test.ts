@@ -208,6 +208,28 @@ describe('fresh database initialization safety', () => {
     ), (error: unknown) => error instanceof FreshInitializationError && error.stage === 'BASELINE_HISTORY_INVALID');
   });
 
+  it('accepts a baseline through 0005 followed by the forward contact-inquiries migration', async () => {
+    const freshJournal = await readFile(new URL('../drizzle/fresh/meta/_journal.json', import.meta.url), 'utf8');
+    const mainJournal = await readFile(new URL('../drizzle/meta/_journal.json', import.meta.url), 'utf8');
+    assert.doesNotThrow(() => validateFreshBaselineHistory(freshJournal, mainJournal));
+  });
+
+  it('rejects invalid ordering, replayed baseline migrations, and inconsistent forward history', async () => {
+    const freshJournal = JSON.parse(await readFile(new URL('../drizzle/fresh/meta/_journal.json', import.meta.url), 'utf8')) as { entries: Array<{ tag: string; when: number }> };
+    const mainJournal = JSON.parse(await readFile(new URL('../drizzle/meta/_journal.json', import.meta.url), 'utf8')) as { entries: Array<{ tag: string; when: number }> };
+    const invalidHistories = [
+      { ...mainJournal, entries: mainJournal.entries.map((entry, index) => index === 5 ? { ...entry, when: freshJournal.entries[0]!.when } : entry) },
+      { ...mainJournal, entries: mainJournal.entries.map((entry, index) => index === 0 ? { ...entry, tag: '0006_contact-inquiries' } : entry) },
+      { ...mainJournal, entries: mainJournal.entries.map((entry, index) => index === 6 ? { ...entry, when: freshJournal.entries[0]!.when } : entry) },
+      { ...mainJournal, entries: mainJournal.entries.map((entry, index) => index === 6 ? { ...entry, tag: '0005_razorpay-test-payments' } : entry) },
+      { ...mainJournal, entries: mainJournal.entries.map((entry, index) => index === 6 ? { ...entry, when: 0 } : entry) },
+    ];
+    for (const invalid of invalidHistories) {
+      assert.throws(() => validateFreshBaselineHistory(JSON.stringify(freshJournal), JSON.stringify(invalid)), (error: unknown) =>
+        error instanceof FreshInitializationError && error.stage === 'BASELINE_HISTORY_INVALID');
+    }
+  });
+
   it('matches baseline table and column declarations to all 13 Drizzle tables', async () => {
     const sql = await readFile(new URL('../drizzle/fresh/0000_application-baseline.sql', import.meta.url), 'utf8');
     const snapshot = JSON.parse(await readFile(new URL('../drizzle/fresh/meta/0000_snapshot.json', import.meta.url), 'utf8')) as {
@@ -248,13 +270,27 @@ describe('fresh database initialization safety', () => {
     assert.doesNotMatch(sql, /postgres(?:ql)?:\/\/|password\s*=/i);
   });
 
-  it('places the fresh-baseline timestamp after every immutable legacy migration', async () => {
+  it('places the fresh baseline after represented migrations and before forward migration 0006', async () => {
     const freshJournal = JSON.parse(await readFile(new URL('../drizzle/fresh/meta/_journal.json', import.meta.url), 'utf8')) as { entries: Array<{ when: number }> };
-    const legacyJournal = JSON.parse(await readFile(new URL('../drizzle/meta/_journal.json', import.meta.url), 'utf8')) as { entries: Array<{ when: number }> };
+    const legacyJournal = JSON.parse(await readFile(new URL('../drizzle/meta/_journal.json', import.meta.url), 'utf8')) as { entries: Array<{ when: number; tag: string }> };
     assert.equal(freshJournal.entries.length, 1);
-    assert.ok(freshJournal.entries[0]!.when > Math.max(...legacyJournal.entries.map((entry) => entry.when)));
+    const representedEntries = legacyJournal.entries.slice(0, 6);
+    assert.deepEqual(representedEntries.map((entry) => entry.tag), [
+      '0000_products-publication-status', '0001_customer-cart', '0002_cart-merge-idempotency',
+      '0003_checkout-orders', '0004_inventory-reservations', '0005_razorpay-test-payments',
+    ]);
+    assert.ok(freshJournal.entries[0]!.when > Math.max(...representedEntries.map((entry) => entry.when)));
     const forwardEntries = legacyJournal.entries.slice(6);
-    assert.ok(forwardEntries.every((entry) => entry.when > freshJournal.entries[0]!.when), 'future main-line migrations must be newer than the fresh baseline');
+    assert.equal(forwardEntries[0]?.tag, '0006_contact-inquiries');
+    assert.ok(forwardEntries.length > 0 && forwardEntries.every((entry) => entry.when > freshJournal.entries[0]!.when), 'forward migrations must be newer than the fresh baseline');
+    assert.equal(forwardEntries.filter((entry) => entry.tag === '0006_contact-inquiries').length, 1);
+    const baselineSql = await readFile(new URL('../drizzle/fresh/0000_application-baseline.sql', import.meta.url), 'utf8');
+    const baselineSnapshot = JSON.parse(await readFile(new URL('../drizzle/fresh/meta/0000_snapshot.json', import.meta.url), 'utf8')) as { tables: Record<string, unknown> };
+    assert.doesNotMatch(baselineSql, /CREATE TABLE "contact_inquiries"/);
+    assert.equal('public.contact_inquiries' in baselineSnapshot.tables, false);
+    const contactMigration = await readFile(new URL('../drizzle/0006_contact-inquiries.sql', import.meta.url), 'utf8');
+    assert.match(contactMigration, /CREATE TABLE "contact_inquiries"/);
+    assert.match(contactMigration, /CREATE INDEX "contact_inquiries_created_at_idx"/);
     assert.equal(freshDatabaseFingerprint({ host: '127.0.0.1', port: 55432, database: 'rcmega_fresh' }), 'localhost:55432/rcmega_fresh');
   });
 });

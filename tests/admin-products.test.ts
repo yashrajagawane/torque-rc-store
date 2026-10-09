@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { describe, it } from 'node:test';
+import { isProductImageWithinUploadLimit, MAX_PRODUCT_IMAGE_BYTES } from '../src/lib/product-upload.ts';
 import express from 'express';
 import { availabilityForStock, buildNewProductValues, buildProductUpdateValues, createAdminProductRouter, referencesExist } from '../src/server/admin-product-routes.ts';
 import { productInputSchema, productPublicationSchema } from '../src/server/product-validation.ts';
@@ -26,6 +27,13 @@ const validProduct = {
 };
 
 describe('admin product validation and publication', () => {
+  it('keeps image uploads below the Vercel Function request-body limit', () => {
+    assert.equal(MAX_PRODUCT_IMAGE_BYTES, 4 * 1024 * 1024);
+    assert.equal(isProductImageWithinUploadLimit(1), true);
+    assert.equal(isProductImageWithinUploadLimit(MAX_PRODUCT_IMAGE_BYTES), true);
+    assert.equal(isProductImageWithinUploadLimit(MAX_PRODUCT_IMAGE_BYTES + 1), false);
+    assert.equal(isProductImageWithinUploadLimit(0), false);
+  });
   it('accepts valid product data and rejects invalid price, slug, and reference IDs', () => {
     assert.equal(productInputSchema.safeParse(validProduct).success, true);
     assert.equal(productInputSchema.safeParse({ ...validProduct, slug: 'Bad Slug' }).success, false);

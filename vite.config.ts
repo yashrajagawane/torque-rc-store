@@ -6,6 +6,9 @@ import {defineConfig} from 'vite';
 export default defineConfig(() => {
   return {
     plugins: [react(), tailwindcss()],
+    // `public/` is generated as Vercel's deployment asset directory after the
+    // Vite build; it is not a source asset directory.
+    publicDir: false as const,
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

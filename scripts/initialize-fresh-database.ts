@@ -118,15 +118,32 @@ export async function runFreshDatabaseInitialization(
 export function validateFreshBaselineHistory(freshJournalText: string, legacyJournalText: string): void {
   try {
     const freshJournal = JSON.parse(freshJournalText) as { entries?: Array<{ tag?: string; when?: number }> };
-    const legacyJournal = JSON.parse(legacyJournalText) as { entries?: Array<{ when?: number }> };
+    const legacyJournal = JSON.parse(legacyJournalText) as { entries?: Array<{ tag?: string; when?: number }> };
     const baseline = freshJournal.entries?.[0];
-    const legacyTimes = legacyJournal.entries?.map((entry) => entry.when ?? 0) ?? [];
+    const legacyEntries = legacyJournal.entries ?? [];
+    const representedTags = [
+      '0000_products-publication-status',
+      '0001_customer-cart',
+      '0002_cart-merge-idempotency',
+      '0003_checkout-orders',
+      '0004_inventory-reservations',
+      '0005_razorpay-test-payments',
+    ];
+    const representedEntries = legacyEntries.slice(0, representedTags.length);
+    const forwardEntries = legacyEntries.slice(representedTags.length);
     if (
       freshJournal.entries?.length !== 1
       || baseline?.tag !== '0000_application-baseline'
       || typeof baseline.when !== 'number'
-      || !legacyTimes.length
-      || baseline.when <= Math.max(...legacyTimes)
+      || !Number.isSafeInteger(baseline.when)
+      || representedEntries.length !== representedTags.length
+      || representedEntries.some((entry, index) => entry.tag !== representedTags[index] || !Number.isSafeInteger(entry.when))
+      || representedEntries.some((entry, index) => index > 0 && entry.when! <= representedEntries[index - 1]!.when!)
+      || baseline.when <= representedEntries.at(-1)!.when!
+      || forwardEntries.length === 0
+      || forwardEntries.some((entry) => typeof entry.tag !== 'string' || !Number.isSafeInteger(entry.when) || entry.when! <= baseline.when!)
+      || forwardEntries.some((entry, index) => index > 0 && entry.when! <= forwardEntries[index - 1]!.when!)
+      || forwardEntries[0]?.tag !== '0006_contact-inquiries'
     ) {
       throw new Error('invalid journal');
     }

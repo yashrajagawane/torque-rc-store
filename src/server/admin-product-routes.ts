@@ -7,6 +7,7 @@ import type { db } from '../db/index.ts';
 import { brands, categories, inventoryReservations, products } from '../db/schema.ts';
 import { requireAuth, requireOwner } from './auth.ts';
 import { productInputSchema, productPublicationSchema, type ProductInput } from './product-validation.ts';
+import { MAX_PRODUCT_IMAGE_BYTES } from '../lib/product-upload.ts';
 
 type Database = typeof db;
 
@@ -213,7 +214,7 @@ export function createAdminProductRouter(database: Database) {
     }
   });
 
-  router.post('/uploads', raw({ type: '*/*', limit: '8mb' }), async (req: Request, res: Response) => {
+  router.post('/uploads', raw({ type: '*/*', limit: MAX_PRODUCT_IMAGE_BYTES }), async (req: Request, res: Response) => {
     const contentType = req.header('content-type')?.split(';', 1)[0].trim().toLowerCase() || '';
     const bytes = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
     const format = imageFormat(contentType, bytes);

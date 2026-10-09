@@ -11,12 +11,26 @@ import { createCartRouter } from './src/server/cart-routes.ts';
 import { createAdminOrderRouter, createOrderRouter } from './src/server/order-routes.ts';
 import { createAdminPaymentReviewRouter, createPaymentRouter, createRazorpayWebhookHandler } from './src/server/payment-routes.ts';
 import { availableAvailabilitySql, availableStockSql } from './src/server/inventory.ts';
+import { createAdminContactInquiryRouter, createPublicContactRouter } from './src/server/contact-routes.ts';
+import { createHealthRouter } from './src/server/health-routes.ts';
+import { createReservationCleanupHandler } from './src/server/reservation-cron-route.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 const port = process.env.PORT || 3000;
+
+app.use(createHealthRouter(async () => {
+  await db.transaction(async (transaction) => {
+    await transaction.execute(sql`SET LOCAL statement_timeout = '3s'`);
+    await transaction.execute(sql`SELECT 1`);
+  });
+}));
+app.post('/api/internal/reservations/expire', createReservationCleanupHandler({
+  database: db,
+  getSecret: () => process.env.CRON_SECRET,
+}));
 
 // Razorpay signs the exact request bytes; register this route before JSON parsing.
 app.post('/api/payments/razorpay/webhook', express.raw({ type: 'application/json', limit: '1mb' }), createRazorpayWebhookHandler(db));
@@ -42,9 +56,11 @@ app.get('/api/owner/test', requireAuth, requireOwner, (_req, res) => {
 app.use('/api/admin', createAdminProductRouter(db));
 app.use('/api/admin/orders', createAdminOrderRouter(db));
 app.use('/api/admin/payment-review-cases', createAdminPaymentReviewRouter(db));
+app.use('/api/admin/contact-inquiries', createAdminContactInquiryRouter(db));
 app.use('/api/cart', createCartRouter(db));
 app.use('/api/orders', createOrderRouter(db));
 app.use('/api/orders', createPaymentRouter(db));
+app.use('/api/contact-inquiries', createPublicContactRouter(db));
 
 app.get('/api/products', async (req, res) => {
   try {
@@ -101,8 +117,8 @@ app.get('/api/products', async (req, res) => {
 
     const results = await finalQuery;
     res.json(results);
-  } catch (error) {
-    console.error('Error fetching products:', error);
+  } catch {
+    console.error('Product catalogue query failed.');
     res.status(500).json({ error: 'Internal Server Error' });
   }
 });
@@ -132,8 +148,8 @@ app.get('/api/products/:slug', async (req, res) => {
       ...productResult,
       product: { ...productResult.product, stock: availableStock, availability: availableAvailability },
     });
-  } catch (error) {
-    console.error('Error fetching product details:', error);
+  } catch {
+    console.error('Product detail query failed.');
     res.status(500).json({ error: 'Internal Server Error' });
   }
 });
@@ -156,11 +172,20 @@ app.get('/api/brands', async (req, res) => {
   }
 });
 
+app.use('/api', (_req, res) => {
+  res.status(404).json({ error: 'API route not found.' });
+});
+
 // Serve Vite frontend
 if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, 'dist')));
+  // Vercel serves /public assets at its CDN edge. Standalone Node continues to
+  // serve Vite's dist directory directly.
+  if (process.env.VERCEL !== '1') app.use(express.static(path.join(__dirname, 'dist')));
   app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+    const indexPath = process.env.VERCEL === '1'
+      ? path.join(__dirname, 'public', 'index.html')
+      : path.join(__dirname, 'dist', 'index.html');
+    res.sendFile(indexPath);
   });
 } else {
   // In development, the Vite dev server handles frontend requests
@@ -187,7 +212,7 @@ app.use((error: unknown, req: express.Request, res: express.Response, next: expr
   if (res.headersSent) return next(error);
   const type = typeof error === 'object' && error !== null && 'type' in error ? error.type : undefined;
   if (type === 'entity.too.large') {
-    res.status(413).json({ error: req.path === '/api/payments/razorpay/webhook' ? 'Webhook request exceeds the 1 MiB limit.' : 'Image uploads must be 8 MiB or smaller.' });
+    res.status(413).json({ error: req.path === '/api/payments/razorpay/webhook' ? 'Webhook request exceeds the 1 MiB limit.' : 'Image uploads must be 4 MiB or smaller.' });
     return;
   }
   if (type === 'entity.parse.failed') {
@@ -197,6 +222,12 @@ app.use((error: unknown, req: express.Request, res: express.Response, next: expr
   res.status(500).json({ error: 'Request could not be processed.' });
 });
 
-app.listen(port, () => {
-  console.log(`Server running at http://localhost:${port}`);
-});
+export default app;
+
+// Vercel invokes the exported Express application as a Function. Local and
+// standalone production continue to own their HTTP listener.
+if (process.env.VERCEL !== '1') {
+  app.listen(port, () => {
+    console.log(`Server running at http://localhost:${port}`);
+  });
+}

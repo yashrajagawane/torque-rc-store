@@ -24,6 +24,7 @@ import { RequireOwner } from './auth/RequireOwner';
 import { AdminProductsPage } from './pages/AdminProductsPage';
 import { CheckoutPage } from './pages/CheckoutPage';
 import { AdminOrdersPage } from './pages/AdminOrdersPage';
+import { AdminContactInquiriesPage } from './pages/AdminContactInquiriesPage';
 import { CartSync } from './cart/CartSync';
 
 const ScrollToTop = () => {
@@ -118,6 +119,7 @@ export default function App() {
             <Route path="/checkout" element={<RequireAuth><CheckoutPage /></RequireAuth>} />
             <Route path="/admin" element={<RequireOwner><AdminProductsPage /></RequireOwner>} />
             <Route path="/admin/orders" element={<RequireOwner><AdminOrdersPage /></RequireOwner>} />
+            <Route path="/admin/inquiries" element={<RequireOwner><AdminContactInquiriesPage /></RequireOwner>} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </main>

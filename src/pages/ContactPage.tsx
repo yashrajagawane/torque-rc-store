@@ -13,17 +13,29 @@ export const ContactPage = () => {
     message: ''
   });
   const [submitted, setSubmitted] = useState(false);
-  const [ticketId, setTicketId] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState('');
   const [openFaq, setOpenFaq] = useState<number | null>(0);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!formData.name || !formData.email || !formData.message) return;
-    
-    // Generate simulated ticket id
-    const randomTicket = `RCM-${Math.floor(100000 + Math.random() * 900000)}`;
-    setTicketId(randomTicket);
-    setSubmitted(true);
+    if (submitting) return;
+    setSubmitting(true);
+    setSubmitError('');
+    try {
+      const response = await fetch('/api/contact-inquiries', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(formData),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || 'Your inquiry could not be saved. Please try again later.');
+      setSubmitted(true);
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : 'Your inquiry could not be saved. Please try again later.');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const faqs = [
@@ -178,10 +190,10 @@ export const ContactPage = () => {
                     DISPATCH TRANSMISSION RECEIVED
                   </h3>
                   <p className="text-muted-foreground text-sm max-w-md mx-auto italic [word-spacing:0.12em]">
-                    Thank you, <span className="text-white font-bold">{formData.name}</span>. Your inquiry ticket <span className="text-accent font-mono font-bold">{ticketId}</span> has been logged into our technician queue.
+                    Thank you, <span className="text-white font-bold">{formData.name}</span>. Your inquiry was received and saved for store review.
                   </p>
                   <p className="text-xs text-muted-foreground italic [word-spacing:0.1em]">
-                    A certified pit crew specialist will reply to <span className="text-white">{formData.email}</span> shortly.
+                    No email was sent automatically. The contact details you provided are saved with your message.
                   </p>
                   <div className="pt-6">
                     <button
@@ -213,6 +225,8 @@ export const ContactPage = () => {
                     </p>
                   </div>
 
+                  {submitError && <p role="alert" className="border border-red-500/30 bg-red-500/5 p-4 text-sm text-red-300">{submitError}</p>}
+
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                       <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground block mb-2 [word-spacing:0.1em]">
@@ -221,6 +235,8 @@ export const ContactPage = () => {
                       <input
                         type="text"
                         required
+                        minLength={2}
+                        maxLength={100}
                         value={formData.name}
                         onChange={(e) => setFormData({ ...formData, name: e.target.value })}
                         placeholder="e.g. Alex Henderson"
@@ -235,6 +251,7 @@ export const ContactPage = () => {
                       <input
                         type="email"
                         required
+                        maxLength={254}
                         value={formData.email}
                         onChange={(e) => setFormData({ ...formData, email: e.target.value })}
                         placeholder="e.g. alex@example.com"
@@ -250,6 +267,7 @@ export const ContactPage = () => {
                       </label>
                       <input
                         type="tel"
+                        maxLength={32}
                         value={formData.phone}
                         onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
                         placeholder="+1 555-0192"
@@ -282,6 +300,7 @@ export const ContactPage = () => {
                     <input
                       type="text"
                       value={formData.model}
+                      maxLength={120}
                       onChange={(e) => setFormData({ ...formData, model: e.target.value })}
                       placeholder="e.g. RGT EX86190 Rescuer or MJX 14301"
                       className="w-full bg-[#111] border border-white/10 rounded-sm py-3 px-4 text-xs text-white focus:outline-none focus:border-accent"
@@ -295,6 +314,8 @@ export const ContactPage = () => {
                     <textarea
                       required
                       rows={4}
+                      minLength={10}
+                      maxLength={5000}
                       value={formData.message}
                       onChange={(e) => setFormData({ ...formData, message: e.target.value })}
                       placeholder="Describe your inquiry, terrain requirements, or the specific upgrade you are looking for..."
@@ -304,10 +325,11 @@ export const ContactPage = () => {
 
                   <button
                     type="submit"
+                    disabled={submitting}
                     className="btn-primary w-full py-4 text-xs flex items-center justify-center gap-2"
                   >
                     <span className="skew-x-[10deg] flex items-center gap-2 [word-spacing:0.15em]">
-                      <Send size={16} /> Submit To Pit Crew Desk
+                      <Send size={16} /> {submitting ? 'Saving Inquiry…' : 'Submit To Pit Crew Desk'}
                     </span>
                   </button>
                 </form>

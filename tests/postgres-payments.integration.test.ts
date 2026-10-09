@@ -7,17 +7,18 @@ import { eq, inArray, or } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
 import * as schema from '../src/db/schema.ts';
-import { cartItems, inventoryReservations, orderItems, orders, paymentReviewCases, products, razorpayWebhookEvents } from '../src/db/schema.ts';
+import { cartItems, contactInquiries, inventoryReservations, orderItems, orders, paymentReviewCases, products, razorpayWebhookEvents } from '../src/db/schema.ts';
 import { createPaymentRouter, createRazorpayWebhookHandler } from '../src/server/payment-routes.ts';
 import { createOrderRouter } from '../src/server/order-routes.ts';
+import { createAdminContactInquiryRouter, createPublicContactRouter } from '../src/server/contact-routes.ts';
+import { createRequireOwner } from '../src/server/auth.ts';
 import { createPaymentSignature, createWebhookSignature } from '../src/server/razorpay.ts';
-import { initializePostgresIntegrationPool, resolvePostgresIntegrationSettings } from './postgres-integration-guard.ts';
+import { initializePostgresIntegrationPool, resolvePostgresIntegrationOptIn } from './postgres-integration-guard.ts';
 import { createPostgresFixtureScope, withPostgresFixtureCleanup, type PostgresFixtureScope } from './postgres-fixture-scope.ts';
 
-const optedIn = process.env.RUN_POSTGRES_INTEGRATION_TESTS !== undefined;
 // The guard executes before a Pool is constructed. There is intentionally no
 // DATABASE_URL fallback and no import of the app's eager-pool db module.
-const testSettings = optedIn ? resolvePostgresIntegrationSettings(process.env) : null;
+const testSettings = resolvePostgresIntegrationOptIn(process.env);
 const testCredentials = {
   RAZORPAY_KEY_ID: 'rzp_test_integration_mock',
   RAZORPAY_KEY_SECRET: 'integration-only-mock-secret',
@@ -48,7 +49,8 @@ describe('PostgreSQL payment and inventory integration', () => {
           AND to_regclass('public.inventory_reservations') IS NOT NULL
           AND to_regclass('public.cart_items') IS NOT NULL
           AND to_regclass('public.razorpay_webhook_events') IS NOT NULL
-          AND to_regclass('public.payment_review_cases') IS NOT NULL AS ready
+          AND to_regclass('public.payment_review_cases') IS NOT NULL
+          AND to_regclass('public.contact_inquiries') IS NOT NULL AS ready
       `);
       if (!result.rows[0]?.ready) throw new Error('The confirmed test database is missing required reviewed schema tables; no schema changes were applied.');
       database = drizzle(pool, { schema });
@@ -114,6 +116,7 @@ describe('PostgreSQL payment and inventory integration', () => {
   }
 
   async function cleanupFixture(scope: PostgresFixtureScope) {
+    if (scope.contactEmails.length) await database.delete(contactInquiries).where(inArray(contactInquiries.email, scope.contactEmails));
     if (scope.eventIds.length) await database.delete(razorpayWebhookEvents).where(inArray(razorpayWebhookEvents.eventId, scope.eventIds));
     const orderFilters = [];
     if (scope.orderIds.length) orderFilters.push(inArray(orders.id, scope.orderIds));
@@ -163,6 +166,23 @@ describe('PostgreSQL payment and inventory integration', () => {
     const app = express();
     app.use(express.json());
     app.use('/api/orders', createOrderRouter(database, authByHeader));
+    return app;
+  }
+
+  function contactApp() {
+    const app = express();
+    app.use(express.json());
+    app.use('/api/contact-inquiries', createPublicContactRouter(database));
+    const ownerAuth: RequestHandler = (req, res, next) => {
+      if (req.header('X-Integration-Owner') !== 'owner') { res.status(401).end(); return; }
+      (req as Request & { authUser: { id: string; email: string; email_confirmed_at: string; user_metadata: Record<string, unknown> } }).authUser = {
+        id: 'integration-owner', email: 'owner@example.invalid', email_confirmed_at: 'verified', user_metadata: {},
+      };
+      next();
+    };
+    app.use('/api/admin/contact-inquiries', createAdminContactInquiryRouter(
+      database, ownerAuth, createRequireOwner(() => 'owner@example.invalid'),
+    ));
     return app;
   }
 
@@ -235,6 +255,33 @@ describe('PostgreSQL payment and inventory integration', () => {
       assert.equal(customerOrders.length, 1);
       assert.equal(remainingCarts.length, 1, 'the losing customer retains their cart');
       scope.orderIds.push(...customerOrders.map((order) => order.id));
+    });
+  });
+
+  it('persists contact inquiries in PostgreSQL and exposes them only through the owner inbox', async () => {
+    await withFixture(async (scope) => {
+      const email = `contact-${randomUUID()}@example.invalid`;
+      scope.contactEmails.push(email);
+      const inquiry = {
+        name: 'Integration Customer', email, phone: '', inquiryType: 'Technical Advice',
+        model: 'Test crawler', message: 'Which battery connector does this model use?',
+      };
+      await withServer(contactApp(), async (url) => {
+        const submitted = await fetch(`${url}/api/contact-inquiries`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(inquiry),
+        });
+        assert.equal(submitted.status, 201);
+        assert.match((await submitted.json() as { message: string }).message, /received and saved/);
+        const unauthorized = await fetch(`${url}/api/admin/contact-inquiries`);
+        assert.equal(unauthorized.status, 401);
+        const owner = await fetch(`${url}/api/admin/contact-inquiries`, { headers: { 'X-Integration-Owner': 'owner' } });
+        assert.equal(owner.status, 200);
+        const result = await owner.json() as { inquiries: Array<{ email: string; message: string }> };
+        assert.ok(result.inquiries.some((row) => row.email === email && row.message === inquiry.message));
+      });
+      const savedRows = await database.select().from(contactInquiries).where(eq(contactInquiries.email, email));
+      assert.equal(savedRows.length, 1);
+      assert.equal(savedRows[0]?.status, 'NEW');
     });
   });
 

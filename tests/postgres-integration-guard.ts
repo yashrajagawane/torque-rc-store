@@ -149,6 +149,21 @@ export function resolvePostgresIntegrationSettings(
   };
 }
 
+/**
+ * Keep the suite opt-in when the setting is absent, but fail closed when an
+ * explicit, non-true value or an incomplete explicit opt-in is supplied.
+ */
+export function resolvePostgresIntegrationOptIn(
+  env: Record<string, string | undefined>,
+): PostgresIntegrationSettings | null {
+  const optIn = env.RUN_POSTGRES_INTEGRATION_TESTS;
+  if (optIn === undefined) return null;
+  if (optIn !== 'true') {
+    throw new Error('RUN_POSTGRES_INTEGRATION_TESTS must equal true when explicitly configured.');
+  }
+  return resolvePostgresIntegrationSettings(env);
+}
+
 /** Validate first, then pass explicit credentials to an injected pool factory. */
 export function initializePostgresIntegrationPool<T>(
   env: Record<string, string | undefined>,

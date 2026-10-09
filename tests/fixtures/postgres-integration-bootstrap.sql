@@ -2,7 +2,7 @@
 -- PostgreSQL integration-test database. It is not a Drizzle migration, is not
 -- recorded in drizzle/meta, and must never be applied to an existing or
 -- production database. Keep table definitions aligned with src/db/schema.ts
--- and the schema after migrations 0000 through 0005.
+-- and the schema after migrations 0000 through 0006.
 
 BEGIN;
 
@@ -32,6 +32,22 @@ CREATE TABLE "brands" (
   "logo" text,
   "description" text
 );
+
+CREATE TABLE "contact_inquiries" (
+  "id" serial PRIMARY KEY NOT NULL,
+  "name" text NOT NULL,
+  "email" text NOT NULL,
+  "phone" text,
+  "inquiry_type" text NOT NULL,
+  "model" text,
+  "message" text NOT NULL,
+  "status" text NOT NULL DEFAULT 'NEW',
+  "created_at" timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT "contact_inquiries_status_valid"
+    CHECK ("status" IN ('NEW', 'REVIEWED', 'CLOSED'))
+);
+CREATE INDEX "contact_inquiries_created_at_idx"
+  ON "contact_inquiries" USING btree ("created_at");
 
 CREATE TABLE "products" (
   "id" serial PRIMARY KEY NOT NULL,

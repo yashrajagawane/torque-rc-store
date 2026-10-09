@@ -29,6 +29,21 @@ export const brands = pgTable('brands', {
   description: text('description'),
 });
 
+export const contactInquiries = pgTable('contact_inquiries', {
+  id: serial('id').primaryKey(),
+  name: text('name').notNull(),
+  email: text('email').notNull(),
+  phone: text('phone'),
+  inquiryType: text('inquiry_type').notNull(),
+  model: text('model'),
+  message: text('message').notNull(),
+  status: text('status').notNull().default('NEW'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index('contact_inquiries_created_at_idx').on(table.createdAt),
+  check('contact_inquiries_status_valid', sql`${table.status} IN ('NEW', 'REVIEWED', 'CLOSED')`),
+]);
+
 export const products = pgTable('products', {
   id: serial('id').primaryKey(),
   slug: text('slug').notNull().unique(),
