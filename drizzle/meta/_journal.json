@@ -50,6 +50,13 @@
       "when": 1791560527016,
       "tag": "0006_contact-inquiries",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1791567628847,
+      "tag": "0007_application-table-rls-api-hardening",
+      "breakpoints": true
     }
   ]
 }

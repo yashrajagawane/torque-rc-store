@@ -57,6 +57,7 @@ function localTargetFromEnvironment(): StagingDatabaseSettings {
     database: target.database,
     user: decodeURIComponent(url.username),
     effectiveUser: decodeURIComponent(url.username),
+    runtimeUser: decodeURIComponent(url.username),
     password: decodeURIComponent(url.password),
     projectRef: 'localtest000000000000',
     schema: 'public',
@@ -104,6 +105,12 @@ if (!enabled) {
 
         const initial = await pool.query<{ schema_name: string }>(`SELECT schema_name FROM information_schema.schemata WHERE schema_name IN ('auth','storage','drizzle','supabase_migrations')`);
         assert.deepEqual(initial.rows.map((row) => row.schema_name).sort(), []);
+
+        // A staging target without Supabase API roles must be rejected before preflight or DDL.
+        assert.equal(await run('initialize'), 1);
+        assert.match(failures.at(-1) ?? '', /DATA_API_ROLES_FAILED/);
+        await pool.query('CREATE ROLE anon NOLOGIN');
+        await pool.query('CREATE ROLE authenticated NOLOGIN');
         await pool.query('CREATE SCHEMA auth');
         await pool.query('CREATE TABLE auth.staging_sentinel (marker text NOT NULL)');
         await pool.query("INSERT INTO auth.staging_sentinel VALUES ('auth-preserved')");
@@ -181,16 +188,35 @@ if (!enabled) {
         assert.equal(Number(afterBaseline.rows[0]?.baseline_count), 1);
         assert.equal(afterBaseline.rows[0]?.contact_exists, false);
 
+        // Seed representative direct grants so the hardening proves it removes
+        // pre-existing table-column and sequence access too.
+        await pool.query('GRANT SELECT (name) ON TABLE public.products TO anon');
+        await pool.query('GRANT USAGE ON SEQUENCE public.products_id_seq TO authenticated');
+        await pool.query('CREATE ROLE rls_privilege_parent NOLOGIN');
+        await pool.query('GRANT SELECT ON TABLE public.products TO rls_privilege_parent');
+        await pool.query('GRANT rls_privilege_parent TO anon');
+        assert.equal(await run('migrate'), 1, 'inherited owner-facing privilege must fail closed');
+        assert.match(failures.at(-1) ?? '', /FORWARD_MIGRATION_FAILED/);
+        const failedAttempt = await pool.query<{ hardening_count: string }>(`
+          SELECT count(*)::text AS hardening_count FROM drizzle.__drizzle_migrations WHERE created_at = $1
+        `, [baseline.forward[1]?.when]);
+        assert.equal(Number(failedAttempt.rows[0]?.hardening_count), 0, 'failed hardening is not marked as applied');
+        await pool.query('REVOKE rls_privilege_parent FROM anon');
+        await pool.query('REVOKE SELECT ON TABLE public.products FROM rls_privilege_parent');
+        await pool.query('DROP ROLE rls_privilege_parent');
         assert.equal(await run('migrate'), 0, failures.at(-1));
         const history = await pool.query<{ created_at: string; hash: string }>(
           'SELECT created_at::text AS created_at, hash FROM drizzle.__drizzle_migrations ORDER BY created_at, id',
         );
-        assert.equal(history.rows.length, 2, 'baseline and 0006 are the only applied migration records');
+        assert.equal(history.rows.length, 3, 'baseline, 0006, and 0007 are the only applied migration records');
         assert.equal(Number(history.rows[0]?.created_at), baseline.baseline.when);
         assert.equal(Number(history.rows[1]?.created_at), baseline.forward[0]?.when);
+        assert.equal(Number(history.rows[2]?.created_at), baseline.forward[1]?.when);
         assert.equal(baseline.forward[0]?.tag, '0006_contact-inquiries');
+        assert.equal(baseline.forward[1]?.tag, '0007_application-table-rls-api-hardening');
         assert.equal(baseline.forward.filter((entry) => entry.tag === '0006_contact-inquiries').length, 1);
         assert.equal(history.rows.filter((row) => Number(row.created_at) === baseline.forward[0]?.when).length, 1);
+        assert.equal(history.rows.filter((row) => Number(row.created_at) === baseline.forward[1]?.when).length, 1);
 
         const inquirySchema = await pool.query<{ column_name: string; data_type: string; is_nullable: string; column_default: string | null }>(`
           SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns
@@ -209,6 +235,98 @@ if (!enabled) {
           WHERE conrelid = 'public.contact_inquiries'::regclass AND conname = 'contact_inquiries_status_valid'
         `);
         assert.match(statusConstraint.rows[0]?.definition ?? '', /NEW.*REVIEWED.*CLOSED/);
+
+        const security = await pool.query<{ table_name: string; rls: boolean }>(`
+          SELECT c.relname AS table_name, c.relrowsecurity AS rls
+          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = 'public' AND c.relkind IN ('r','p')
+            AND c.relname = ANY($1::text[])
+          ORDER BY c.relname
+        `, [baseline.expectedCurrentTables]);
+        assert.equal(security.rows.length, baseline.expectedCurrentTables.length);
+        assert.equal(security.rows.every((row) => row.rls), true);
+        const forceRls = await pool.query<{ count: string }>(`
+          SELECT count(*)::text AS count FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = 'public' AND c.relname = ANY($1::text[]) AND c.relforcerowsecurity
+        `, [baseline.expectedCurrentTables]);
+        assert.equal(Number(forceRls.rows[0]?.count), 0);
+        const policies = await pool.query<{ count: string }>(`SELECT count(*)::text AS count FROM pg_policies WHERE schemaname='public' AND tablename = ANY($1::text[])`, [baseline.expectedCurrentTables]);
+        assert.equal(Number(policies.rows[0]?.count), 0);
+        const assertDeniedAsRole = async (role: string, query: string) => {
+          const roleClient = await pool.connect();
+          try {
+            await roleClient.query('BEGIN');
+            await roleClient.query(`SET LOCAL ROLE ${role}`);
+            const currentRole = await roleClient.query<{ role: string }>('SELECT current_user AS role');
+            assert.equal(currentRole.rows[0]?.role, role);
+            try {
+              await roleClient.query(query);
+              assert.fail('direct Data API role operation unexpectedly succeeded');
+            } catch (error) {
+              if (error instanceof assert.AssertionError) throw error;
+              const code = error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' ? error.code : 'none';
+              assert.equal(code, '42501', `direct Data API role operation must fail with insufficient_privilege, got ${code}`);
+            }
+          } finally {
+            await roleClient.query('ROLLBACK');
+            roleClient.release();
+          }
+        };
+        for (const role of ['anon', 'authenticated']) {
+          const grants = await pool.query<{ table_name: string; select: boolean; insert: boolean; update: boolean; delete: boolean; sequence_usage: boolean }>(`
+            SELECT table_name,
+                   has_table_privilege($1, format('public.%I', table_name), 'SELECT') AS select,
+                   has_table_privilege($1, format('public.%I', table_name), 'INSERT') AS insert,
+                   has_table_privilege($1, format('public.%I', table_name), 'UPDATE') AS update,
+                   has_table_privilege($1, format('public.%I', table_name), 'DELETE') AS delete,
+                   has_sequence_privilege($1, format('public.%I_id_seq', table_name), 'USAGE') AS sequence_usage
+            FROM unnest($2::text[]) AS app(table_name) ORDER BY app.table_name
+          `, [role, baseline.expectedCurrentTables]);
+          assert.equal(grants.rows.length, baseline.expectedCurrentTables.length);
+          assert.equal(grants.rows.every((row) => !row.select && !row.insert && !row.update && !row.delete && !row.sequence_usage), true);
+          await assertDeniedAsRole(role, 'SELECT * FROM public.products');
+          await assertDeniedAsRole(role, 'SELECT name FROM public.products');
+          await assertDeniedAsRole(role, `INSERT INTO public.contact_inquiries(name,email,inquiry_type,message) VALUES ('Denied','denied@example.invalid','OTHER','Denied')`);
+        }
+
+        // Exercise server access as a non-superuser table owner. PostgreSQL
+        // owners bypass RLS unless FORCE RLS is set; API roles remain revoked.
+        const runtimeRole = 'rcmega_staging_runtime';
+        await pool.query(`CREATE ROLE "${runtimeRole}" NOLOGIN NOSUPERUSER NOBYPASSRLS`);
+        for (const table of baseline.expectedCurrentTables) {
+          await pool.query(`ALTER TABLE public."${table}" OWNER TO "${runtimeRole}"`);
+          await pool.query(`ALTER SEQUENCE public."${table}_id_seq" OWNER TO "${runtimeRole}"`);
+        }
+        await pool.query(`GRANT USAGE ON SCHEMA public TO "${runtimeRole}"`);
+        const runtimeClient = await pool.connect();
+        try {
+          await runtimeClient.query('BEGIN');
+          await runtimeClient.query(`SET LOCAL ROLE "${runtimeRole}"`);
+          const runtimeIdentity = await runtimeClient.query<{ user: string; superuser: boolean; bypass_rls: boolean }>(`
+            SELECT current_user AS user, r.rolsuper AS superuser, r.rolbypassrls AS bypass_rls
+            FROM pg_roles r WHERE r.rolname = current_user
+          `);
+          assert.deepEqual(runtimeIdentity.rows[0], { user: runtimeRole, superuser: false, bypass_rls: false });
+          await runtimeClient.query('SELECT * FROM public.products LIMIT 1');
+          await runtimeClient.query('SELECT * FROM public.cart_items LIMIT 1');
+          await runtimeClient.query('SELECT * FROM public.orders LIMIT 1');
+          await runtimeClient.query(`INSERT INTO public.contact_inquiries(name,email,inquiry_type,message) VALUES ('Local Test','local@example.invalid','OTHER','Disposable integration test')`);
+          await runtimeClient.query('COMMIT');
+        } catch (error) {
+          await runtimeClient.query('ROLLBACK');
+          throw error;
+        } finally {
+          runtimeClient.release();
+        }
+
+        await pool.query('CREATE TABLE public.staging_future_privilege_test (id serial PRIMARY KEY, payload text)');
+        for (const role of ['anon', 'authenticated']) {
+          const defaults = await pool.query<{ table_select: boolean; seq_usage: boolean }>(`
+            SELECT has_table_privilege($1, 'public.staging_future_privilege_test', 'SELECT') AS table_select,
+                   has_sequence_privilege($1, 'public.staging_future_privilege_test_id_seq', 'USAGE') AS seq_usage
+          `, [role]);
+          assert.deepEqual(defaults.rows[0], { table_select: false, seq_usage: false });
+        }
 
         const sentinels = await pool.query<{ schema_name: string; marker: string }>(`
           SELECT 'auth' AS schema_name, marker FROM auth.staging_sentinel

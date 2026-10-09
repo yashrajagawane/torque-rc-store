@@ -6,6 +6,7 @@ import { getTableConfig } from 'drizzle-orm/pg-core';
 import * as schema from '../src/db/schema.ts';
 import {
   assertStagingBaselineState,
+  assertStagingDataApiRoles,
   assertStagingIdentity,
   assertStagingInitializationState,
   assertStagingMigrationHistory,
@@ -53,7 +54,7 @@ function diagnostic(mode: StagingMode, stage: string) {
 
 function assertSchemaState(state: StagingCatalogState, expected: Pick<StagingRunnerDependencies,
   'expectedBaselineTables' | 'expectedBaselineColumns' | 'expectedBaselineIndexes' | 'expectedBaselineConstraints'
-> & { contactExpected: boolean; current?: Pick<StagingRunnerDependencies, 'expectedCurrentTables' | 'expectedCurrentColumns' | 'expectedCurrentIndexes' | 'expectedCurrentConstraints'> }) {
+> & { contactExpected: boolean; rlsExpected: boolean; current?: Pick<StagingRunnerDependencies, 'expectedCurrentTables' | 'expectedCurrentColumns' | 'expectedCurrentIndexes' | 'expectedCurrentConstraints'> }) {
   const tables = expected.contactExpected ? expected.current!.expectedCurrentTables : expected.expectedBaselineTables;
   const columns = expected.contactExpected ? expected.current!.expectedCurrentColumns : expected.expectedBaselineColumns;
   const indexes = expected.contactExpected ? expected.current!.expectedCurrentIndexes : expected.expectedBaselineIndexes;
@@ -71,9 +72,10 @@ function assertSchemaState(state: StagingCatalogState, expected: Pick<StagingRun
   if (state.publicObjects.some((object) => !object.extensionOwned && (object.kind !== 'relation' || !permittedObjects.has(object.name)))) {
     throw new Error('public schema contains unexpected objects');
   }
-  if (state.applicationRlsTables.length || state.applicationPolicies.length) {
-    throw new Error('application RLS or policies differ from the reviewed baseline and require manual review');
-  }
+  const actualRls = new Set(state.applicationRlsTables);
+  if (actualRls.size !== (expected.rlsExpected ? tables.length : 0)
+    || (expected.rlsExpected && tables.some((table) => !actualRls.has(table)))
+    || state.applicationPolicies.length) throw new Error('application RLS or policies differ from the expected migration state');
   for (const [table, required] of Object.entries(columns)) {
     const actual = new Map((state.applicationColumns[table] ?? []).map((column) => [column.name, column]));
     if (actual.size !== required.length || required.some((column) => {
@@ -115,6 +117,7 @@ export async function runSupabaseStagingCommand(
     settings = resolveSupabaseStagingSettings(mode, args, env);
     if (!dependencies.baseline.hash || dependencies.baseline.tag !== '0000_application-baseline') throw new Error('invalid baseline journal');
     if (dependencies.forward[0]?.tag !== '0006_contact-inquiries') throw new Error('invalid forward journal');
+    if (dependencies.forward[1]?.tag !== '0007_application-table-rls-api-hardening') throw new Error('invalid application-table hardening migration');
     if (dependencies.forward.some((entry, index) => entry.when <= dependencies.baseline.when || (index > 0 && entry.when <= dependencies.forward[index - 1]!.when))) throw new Error('invalid migration ordering');
   } catch {
     report(diagnostic(mode, 'CONFIGURATION_INVALID'));
@@ -138,6 +141,7 @@ export async function runSupabaseStagingOperations(
 ): Promise<number> {
   if (!dependencies.baseline.hash || dependencies.baseline.tag !== '0000_application-baseline'
     || dependencies.forward[0]?.tag !== '0006_contact-inquiries'
+    || dependencies.forward[1]?.tag !== '0007_application-table-rls-api-hardening'
     || dependencies.forward.some((entry, index) => entry.when <= dependencies.baseline.when || (index > 0 && entry.when <= dependencies.forward[index - 1]!.when))) {
     report(diagnostic(mode, 'CONFIGURATION_INVALID'));
     return 2;
@@ -150,6 +154,8 @@ export async function runSupabaseStagingOperations(
     stage = 'IDENTITY_FAILED';
     const before = await runtime.inspect();
     assertStagingIdentity(before.identity, settings);
+    stage = 'DATA_API_ROLES_FAILED';
+    assertStagingDataApiRoles(before.dataApiRoles);
     stage = 'PREFLIGHT_FAILED';
     if (mode === 'initialize') {
       assertStagingInitializationState(before, [
@@ -182,6 +188,7 @@ export async function runSupabaseStagingOperations(
         expectedBaselineIndexes: dependencies.expectedBaselineIndexes,
         expectedBaselineConstraints: dependencies.expectedBaselineConstraints,
         contactExpected: false,
+        rlsExpected: false,
       });
     } else {
       if (before.supabaseMigrationSchemaExists || before.supabaseMigrationRecords !== 0) {
@@ -200,6 +207,7 @@ export async function runSupabaseStagingOperations(
         expectedBaselineIndexes: dependencies.expectedBaselineIndexes,
         expectedBaselineConstraints: dependencies.expectedBaselineConstraints,
         contactExpected: appliedForwardCount > 0,
+        rlsExpected: appliedForwardCount >= 2,
         current: {
           expectedCurrentTables: dependencies.expectedCurrentTables,
           expectedCurrentColumns: dependencies.expectedCurrentColumns,
@@ -227,6 +235,7 @@ export async function runSupabaseStagingOperations(
         expectedBaselineIndexes: dependencies.expectedBaselineIndexes,
         expectedBaselineConstraints: dependencies.expectedBaselineConstraints,
         contactExpected: true,
+        rlsExpected: true,
         current: {
           expectedCurrentTables: dependencies.expectedCurrentTables,
           expectedCurrentColumns: dependencies.expectedCurrentColumns,
@@ -433,6 +442,7 @@ export async function openPostgresRuntime(settings: StagingDatabaseSettings): Pr
       migrationHistory = rows.rows.map((row) => ({ hash: row.hash, createdAt: Number(row.created_at) }));
     }
     const supabaseSchema = await pool.query<{ exists: boolean }>(`SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = 'supabase_migrations') AS exists`);
+    const dataApiRoles = await pool.query<{ rolname: string }>(`SELECT rolname FROM pg_roles WHERE rolname IN ('anon', 'authenticated') ORDER BY rolname`);
     let supabaseMigrationRecords = 0;
     if (supabaseSchema.rows[0]?.exists) {
       const tableExists = await pool.query<{ exists: boolean }>(`SELECT to_regclass('supabase_migrations.schema_migrations') IS NOT NULL AS exists`);
@@ -502,6 +512,7 @@ export async function openPostgresRuntime(settings: StagingDatabaseSettings): Pr
       migrationHistory,
       supabaseMigrationSchemaExists: Boolean(supabaseSchema.rows[0]?.exists),
       supabaseMigrationRecords,
+      dataApiRoles: dataApiRoles.rows.map((row) => row.rolname),
       applicationTables: tableRows.rows.map((row) => row.tablename),
       applicationColumns: columns,
       applicationIndexes: indexRows.rows.map((row) => row.indexname),

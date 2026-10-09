@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   assertStagingIdentity,
+  assertStagingDataApiRoles,
   assertStagingInitializationState,
   assertStagingMigrationHistory,
   normalizeStagingSqlType,
@@ -26,13 +27,14 @@ const baseEnv: Record<string, string | undefined> = {
   SUPABASE_STAGING_DATABASE_NAME: 'postgres',
   SUPABASE_STAGING_DATABASE_USER: 'postgres',
   SUPABASE_STAGING_DATABASE_EFFECTIVE_USER: 'postgres',
+  SUPABASE_STAGING_RUNTIME_DATABASE_USER: 'postgres',
   SUPABASE_STAGING_SCHEMA: 'public',
   SUPABASE_STAGING_TARGET_FINGERPRINT: `db.${stagingRef}.supabase.co:5432/postgres/postgres`,
   SUPABASE_STAGING_INITIALIZATION_CONFIRMATION: 'I_CONFIRM_NEW_SUPABASE_STAGING_SCHEMA',
   SUPABASE_STAGING_MIGRATION_CONFIRMATION: 'I_CONFIRM_SUPABASE_STAGING_MIGRATION',
 };
 
-function state(deps: StagingRunnerDependencies, contact = false): StagingCatalogState {
+function state(deps: StagingRunnerDependencies, contact = false, securityApplied = false): StagingCatalogState {
   const tables = contact ? deps.expectedCurrentTables : deps.expectedBaselineTables;
   const columns = contact ? deps.expectedCurrentColumns : deps.expectedBaselineColumns;
   const indexes = contact ? deps.expectedCurrentIndexes : deps.expectedBaselineIndexes;
@@ -45,6 +47,7 @@ function state(deps: StagingRunnerDependencies, contact = false): StagingCatalog
     migrationHistory: [{ hash: deps.baseline.hash, createdAt: deps.baseline.when }],
     supabaseMigrationSchemaExists: false,
     supabaseMigrationRecords: 0,
+    dataApiRoles: ['anon', 'authenticated'],
     applicationTables: tables,
     applicationColumns: Object.fromEntries(Object.entries(columns).map(([table, values]) => [table, values.map((column) => ({
       ...column,
@@ -53,7 +56,7 @@ function state(deps: StagingRunnerDependencies, contact = false): StagingCatalog
     applicationIndexes: indexes,
     applicationConstraints: constraints,
     applicationColumnDefaults: contact ? { contact_inquiries: { status: "'NEW'::text", created_at: 'now()' } } : {},
-    applicationRlsTables: [],
+    applicationRlsTables: securityApplied ? tables : [],
     applicationPolicies: [],
     contactInquiryStatusConstraint: contact ? "CHECK ((status = ANY (ARRAY['NEW'::text, 'REVIEWED'::text, 'CLOSED'::text])))" : undefined,
     contactInquiryCreatedAtIndex: contact ? 'CREATE INDEX contact_inquiries_created_at_idx ON public.contact_inquiries USING btree (created_at)' : undefined,
@@ -120,7 +123,7 @@ describe('Supabase staging initialization guard', () => {
     const empty: StagingCatalogState = {
       identity: { database: 'postgres', user: 'postgres', currentSchema: 'public', searchPath: 'public', serverPort: 5432 },
       publicObjects: [], drizzleSchemaExists: false, drizzleRelations: [], migrationHistory: [],
-      supabaseMigrationSchemaExists: false, supabaseMigrationRecords: 0,
+      supabaseMigrationSchemaExists: false, supabaseMigrationRecords: 0, dataApiRoles: ['anon', 'authenticated'],
       applicationTables: [], applicationColumns: {}, applicationIndexes: [], applicationConstraints: [], applicationColumnDefaults: {}, applicationRlsTables: [], applicationPolicies: [],
     };
     assert.doesNotThrow(() => assertStagingInitializationState(empty));
@@ -139,7 +142,7 @@ describe('Supabase staging initialization guard', () => {
       identity: { database: 'postgres', user: 'postgres', currentSchema: 'public', searchPath: 'public', serverPort: 5432 },
       publicObjects: [{ name: 'extension_table', kind: 'relation', extensionOwned: true }],
       drizzleSchemaExists: false, drizzleRelations: [], migrationHistory: [],
-      supabaseMigrationSchemaExists: false, supabaseMigrationRecords: 0,
+      supabaseMigrationSchemaExists: false, supabaseMigrationRecords: 0, dataApiRoles: ['anon', 'authenticated'],
       applicationTables: [], applicationColumns: {}, applicationIndexes: [], applicationConstraints: [], applicationColumnDefaults: {}, applicationRlsTables: [], applicationPolicies: [],
     };
     assert.doesNotThrow(() => assertStagingInitializationState(empty));
@@ -149,6 +152,7 @@ describe('Supabase staging initialization guard', () => {
   it('validates a baseline marker and a contiguous forward migration prefix without using server port as URL port', async () => {
     const deps = await loadStagingRunnerDependencies(async () => { throw new Error('unused'); });
     assert.equal(deps.forward[0]?.tag, '0006_contact-inquiries');
+    assert.equal(deps.forward[1]?.tag, '0007_application-table-rls-api-hardening');
     assertStagingMigrationHistory([{ hash: deps.baseline.hash, createdAt: deps.baseline.when }], deps.baseline, deps.forward, true);
     assert.throws(() => assertStagingMigrationHistory([{ hash: 'wrong', createdAt: deps.baseline.when }], deps.baseline, deps.forward, true));
     const ordered = [
@@ -166,6 +170,15 @@ describe('Supabase staging initialization guard', () => {
     assert.ok(deps.expectedBaselineConstraints.includes('users_uid_unique'));
     assert.ok(deps.expectedBaselineConstraints.includes('users_pkey'));
     assert.ok(deps.expectedBaselineConstraints.includes('products_pkey'));
+  });
+
+  it('requires both Supabase Data API roles and requires a shared runtime/migration role', () => {
+    assert.doesNotThrow(() => assertStagingDataApiRoles(['anon', 'authenticated']));
+    assert.throws(() => assertStagingDataApiRoles(['anon']));
+    assert.throws(() => resolveSupabaseStagingSettings('migrate', ['--confirm-staging-migrate'], {
+      ...baseEnv,
+      SUPABASE_STAGING_RUNTIME_DATABASE_USER: 'different_runtime_role',
+    }));
   });
 
   it('runs the baseline only after valid guard and schema preflight, then verifies the marker', async () => {
@@ -210,7 +223,7 @@ describe('Supabase staging initialization guard', () => {
           applyBaseline: async () => assert.fail('baseline must not run in migration command'),
           applyForwardMigrations: async () => {
             migrations += 1;
-            current = state(deps, true);
+            current = state(deps, true, true);
             current.migrationHistory = [
               { hash: deps.baseline.hash, createdAt: deps.baseline.when },
               ...deps.forward.map((entry) => ({ hash: entry.hash, createdAt: entry.when })),

@@ -9,6 +9,7 @@ export type StagingDatabaseSettings = {
   database: string;
   user: string;
   effectiveUser: string;
+  runtimeUser: string;
   password: string;
   projectRef: string;
   schema: 'public';
@@ -24,6 +25,7 @@ export type StagingCatalogState = {
   migrationHistory: Array<{ hash: string; createdAt: number }>;
   supabaseMigrationSchemaExists: boolean;
   supabaseMigrationRecords: number;
+  dataApiRoles: string[];
   applicationTables: string[];
   applicationColumns: Record<string, Array<{ name: string; type: string; notNull: boolean; hasDefault: boolean }>>;
   applicationIndexes: string[];
@@ -143,7 +145,9 @@ export function resolveSupabaseStagingSettings(
   const expectedDatabase = env.SUPABASE_STAGING_DATABASE_NAME?.trim();
   const expectedUser = env.SUPABASE_STAGING_DATABASE_USER?.trim();
   const effectiveUser = env.SUPABASE_STAGING_DATABASE_EFFECTIVE_USER?.trim();
-  if (!expectedDatabase || !expectedUser || !effectiveUser) throw new Error('Expected staging database name, login user, and effective database user are required.');
+  const runtimeUser = env.SUPABASE_STAGING_RUNTIME_DATABASE_USER?.trim();
+  if (!expectedDatabase || !expectedUser || !effectiveUser || !runtimeUser) throw new Error('Expected staging database name, login user, effective database user, and runtime database user are required.');
+  if (runtimeUser !== effectiveUser) throw new Error('The staging runtime database role must equal the migration owner role unless separately reviewed.');
   if (parsed.host !== expectedHost || parsed.port !== expectedPort || parsed.database !== expectedDatabase || parsed.user !== expectedUser) {
     throw new Error('Staging connection target does not match its independent expected identity.');
   }
@@ -177,11 +181,18 @@ export function resolveSupabaseStagingSettings(
   return {
     ...parsed,
     effectiveUser,
+    runtimeUser,
     projectRef,
     schema: 'public',
     ssl: true,
     fingerprint,
   };
+}
+
+export function assertStagingDataApiRoles(roles: string[]): void {
+  if (!roles.includes('anon') || !roles.includes('authenticated')) {
+    throw new Error('Expected Supabase Data API roles are missing.');
+  }
 }
 
 export function assertStagingIdentity(

@@ -11,7 +11,7 @@ export const users = pgTable('users', {
   isAdmin: boolean('is_admin').default(false),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),
-});
+}).enableRLS();
 
 export const categories = pgTable('categories', {
   id: serial('id').primaryKey(),
@@ -19,7 +19,7 @@ export const categories = pgTable('categories', {
   slug: text('slug').notNull().unique(),
   description: text('description'),
   image: text('image'),
-});
+}).enableRLS();
 
 export const brands = pgTable('brands', {
   id: serial('id').primaryKey(),
@@ -27,7 +27,7 @@ export const brands = pgTable('brands', {
   slug: text('slug').notNull().unique(),
   logo: text('logo'),
   description: text('description'),
-});
+}).enableRLS();
 
 export const contactInquiries = pgTable('contact_inquiries', {
   id: serial('id').primaryKey(),
@@ -42,7 +42,7 @@ export const contactInquiries = pgTable('contact_inquiries', {
 }, (table) => [
   index('contact_inquiries_created_at_idx').on(table.createdAt),
   check('contact_inquiries_status_valid', sql`${table.status} IN ('NEW', 'REVIEWED', 'CLOSED')`),
-]);
+]).enableRLS();
 
 export const products = pgTable('products', {
   id: serial('id').primaryKey(),
@@ -72,7 +72,7 @@ export const products = pgTable('products', {
   isPublished: boolean('is_published').notNull().default(false),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),
-});
+}).enableRLS();
 
 export const orders = pgTable('orders', {
   id: serial('id').primaryKey(),
@@ -100,7 +100,7 @@ export const orders = pgTable('orders', {
   uniqueIndex('orders_razorpay_payment_id_unique').on(table.razorpayPaymentId),
   index('orders_customer_auth_id_idx').on(table.customerAuthId),
   check('orders_razorpay_creation_status_valid', sql`${table.razorpayOrderCreationStatus} IN ('NOT_STARTED', 'CREATING', 'CREATED', 'FAILED')`),
-]);
+]).enableRLS();
 
 export const razorpayWebhookEvents = pgTable('razorpay_webhook_events', {
   id: serial('id').primaryKey(),
@@ -114,7 +114,7 @@ export const razorpayWebhookEvents = pgTable('razorpay_webhook_events', {
 }, (table) => [
   index('razorpay_webhook_events_payment_idx').on(table.gatewayPaymentId),
   check('razorpay_webhook_events_status_valid', sql`${table.processingStatus} IN ('RECEIVED', 'PROCESSED', 'IGNORED', 'REVIEW_REQUIRED')`),
-]);
+]).enableRLS();
 
 export const paymentReviewCases = pgTable('payment_review_cases', {
   id: serial('id').primaryKey(),
@@ -130,7 +130,7 @@ export const paymentReviewCases = pgTable('payment_review_cases', {
   index('payment_review_cases_order_idx').on(table.orderId, table.createdAt),
   check('payment_review_cases_amount_positive', sql`${table.amountPaise} > 0`),
   check('payment_review_cases_status_valid', sql`${table.status} IN ('OPEN', 'RESOLVED')`),
-]);
+]).enableRLS();
 
 export const orderItems = pgTable('order_items', {
   id: serial('id').primaryKey(),
@@ -140,7 +140,7 @@ export const orderItems = pgTable('order_items', {
   productSlug: text('product_slug').notNull().default(''),
   quantity: integer('quantity').notNull(),
   price: numeric('price', { precision: 10, scale: 2 }).notNull(),
-});
+}).enableRLS();
 
 export const inventoryReservations = pgTable('inventory_reservations', {
   id: serial('id').primaryKey(),
@@ -157,14 +157,14 @@ export const inventoryReservations = pgTable('inventory_reservations', {
   index('inventory_reservations_expiry_idx').on(table.status, table.expiresAt),
   check('inventory_reservations_quantity_positive', sql`${table.quantity} > 0`),
   check('inventory_reservations_status_valid', sql`${table.status} IN ('ACTIVE', 'CONSUMED', 'RELEASED', 'EXPIRED')`),
-]);
+]).enableRLS();
 
 export const wishlist = pgTable('wishlist', {
   id: serial('id').primaryKey(),
   userId: integer('user_id').references(() => users.id),
   productId: integer('product_id').references(() => products.id),
   createdAt: timestamp('created_at').defaultNow(),
-});
+}).enableRLS();
 
 export const reviews = pgTable('reviews', {
   id: serial('id').primaryKey(),
@@ -173,7 +173,7 @@ export const reviews = pgTable('reviews', {
   rating: integer('rating').notNull(),
   comment: text('comment'),
   createdAt: timestamp('created_at').defaultNow(),
-});
+}).enableRLS();
 
 // Supabase Auth users are not mirrored into `users` yet, so carts are keyed by
 // the verified Supabase UUID directly instead of requiring a local profile row.
@@ -187,7 +187,7 @@ export const cartItems = pgTable('cart_items', {
 }, (table) => [
   uniqueIndex('cart_items_user_product_unique').on(table.userId, table.productId),
   check('cart_items_quantity_positive', sql`${table.quantity} > 0`),
-]);
+]).enableRLS();
 
 export const cartMergeOperations = pgTable('cart_merge_operations', {
   id: serial('id').primaryKey(),
@@ -198,7 +198,7 @@ export const cartMergeOperations = pgTable('cart_merge_operations', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (table) => [
   uniqueIndex('cart_merge_operations_user_key_unique').on(table.userId, table.requestKey),
-]);
+]).enableRLS();
 
 // Relations
 export const usersRelations = relations(users, ({ many }) => ({
