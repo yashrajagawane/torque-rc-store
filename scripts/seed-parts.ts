@@ -1,10 +1,8 @@
-import dotenv from 'dotenv';
-dotenv.config();
+import 'dotenv/config';
 
 import { createPool } from '../src/db/index.ts';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import * as schema from '../src/db/schema.ts';
-import { eq } from 'drizzle-orm';
 
 async function seed() {
   const pool = createPool();
@@ -41,10 +39,15 @@ async function seed() {
 
   // Fetch Brands
   const allBrands = await db.select().from(schema.brands);
-  const rgt = allBrands.find(b => b.slug === 'rgt') || allBrands[0];
-  const mjx = allBrands.find(b => b.slug === 'mjx') || allBrands[1];
-  const fms = allBrands.find(b => b.slug === 'fms') || allBrands[2];
-  const rlaarlo = allBrands.find(b => b.slug === 'rlaarlo') || allBrands[6];
+  const getBrand = (slug: string) => {
+    const brand = allBrands.find((item) => item.slug === slug);
+    if (!brand) throw new Error(`Required brand "${slug}" is missing. Run the reference-data seed first.`);
+    return brand;
+  };
+  const rgt = getBrand('rgt');
+  const mjx = getBrand('mjx');
+  const fms = getBrand('fms');
+  const rlaarlo = getBrand('rlaarlo');
 
   // 2. Insert Spare Parts Products
   const sparePartsList = [
@@ -255,20 +258,20 @@ async function seed() {
   ];
 
   for (const item of [...sparePartsList, ...accessoriesList]) {
-    const existing = await db.select().from(schema.products).where(eq(schema.products.slug, item.slug));
-    if (existing.length === 0) {
-      await db.insert(schema.products).values(item);
-      console.log('Inserted product:', item.name);
-    } else {
-      console.log('Product already exists:', item.slug);
-    }
+    const [inserted] = await db
+      .insert(schema.products)
+      .values(item)
+      .onConflictDoNothing({ target: schema.products.slug })
+      .returning({ slug: schema.products.slug });
+    console.log(inserted ? `Inserted product: ${item.name}` : `Preserved existing product: ${item.slug}`);
   }
 
   console.log('Seeding finished successfully!');
-  process.exit(0);
+  await pool.end();
 }
 
-seed().catch(err => {
+seed().catch(async err => {
   console.error('Seed error:', err);
-  process.exit(1);
+  await global._postgresPool?.end();
+  process.exitCode = 1;
 });

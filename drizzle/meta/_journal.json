@@ -1,0 +1,41 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1791538565175,
+      "tag": "0000_products-publication-status",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1791539228805,
+      "tag": "0001_customer-cart",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1791539942472,
+      "tag": "0002_cart-merge-idempotency",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1791543205403,
+      "tag": "0003_checkout-orders",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1791544664542,
+      "tag": "0004_inventory-reservations",
+      "breakpoints": true
+    }
+  ]
+}

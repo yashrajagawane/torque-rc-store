@@ -8,10 +8,21 @@
     "build": "vite build",
     "start": "node server.ts",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "bun test",
+    "db:generate": "drizzle-kit generate --config=src/db/drizzle.config.ts",
+    "db:migrate": "drizzle-kit migrate --config=src/db/drizzle.config.ts",
+    "db:check": "drizzle-kit check --config=src/db/drizzle.config.ts",
+    "db:seed:reference": "tsx scripts/seed-reference-data.ts",
+    "db:seed:products": "tsx scripts/seed-unique-products.ts",
+    "db:seed:parts": "tsx scripts/seed-parts.ts",
+    "db:reservations:expire": "tsx scripts/expire-inventory-reservations.ts",
+    "db:images:update": "tsx scripts/update-product-images.ts",
+    "db:images:distribute": "tsx scripts/distribute-unique-car-images.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
+    "@supabase/supabase-js": "^2.117.3",
     "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-react": "^6.1.1",
     "clsx": "^2.1.1",

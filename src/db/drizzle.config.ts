@@ -1,27 +1,23 @@
-import { defineConfig } from "drizzle-kit";
-import * as dotenv from "dotenv";
+import 'dotenv/config';
+import { defineConfig } from 'drizzle-kit';
+import { resolveDatabaseSettings } from './config.ts';
 
-dotenv.config();
-
-const sqlHost = process.env.SQL_HOST;
-const sqlDbName = process.env.SQL_DB_NAME;
-const user = process.env.SQL_ADMIN_USER;
-const password = process.env.SQL_ADMIN_PASSWORD;
-
-if (!sqlHost || !sqlDbName || !user || !password) {
-  console.warn("SQL environment variables not fully set. Drizzle Kit might not work correctly.");
-}
+const settings = resolveDatabaseSettings('migrations');
+const dbCredentials = settings.url
+  ? { url: settings.url, ssl: settings.ssl }
+  : {
+      host: settings.host!,
+      port: settings.port!,
+      database: settings.database!,
+      user: settings.user!,
+      password: settings.password!,
+      ssl: settings.ssl,
+    };
 
 export default defineConfig({
-  schema: "./src/db/schema.ts",
-  out: "./drizzle",
-  dialect: "postgresql",
-  dbCredentials: {
-    host: sqlHost || "",
-    user: user || "",
-    password: password || "",
-    database: sqlDbName || "",
-    ssl: false,
-  },
+  schema: './src/db/schema.ts',
+  out: './drizzle',
+  dialect: 'postgresql',
+  dbCredentials,
   verbose: true,
 });

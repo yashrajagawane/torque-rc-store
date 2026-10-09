@@ -1,5 +1,4 @@
-import dotenv from 'dotenv';
-dotenv.config();
+import 'dotenv/config';
 
 import { createPool } from '../src/db/index.ts';
 import { drizzle } from 'drizzle-orm/node-postgres';
@@ -121,10 +120,17 @@ const EXACT_ASSIGNMENTS: Record<string, string> = {
 };
 
 async function run() {
+  if (!process.argv.includes('--apply')) {
+    console.log('Dry run: no product images were changed. Re-run with --apply to overwrite product image fields.');
+    process.exit(0);
+  }
+
   const pool = createPool();
   const db = drizzle(pool, { schema });
 
   const allProducts = await db.select().from(schema.products);
+  const allCategories = await db.select().from(schema.categories);
+  const categorySlugById = new Map(allCategories.map((category) => [category.id, category.slug]));
   console.log(`Found ${allProducts.length} total products in database.`);
 
   const basherImagePool = [
@@ -144,19 +150,24 @@ async function run() {
 
     if (!chosenImage) {
       // Fallback distribution by category
-      if (product.categoryId === 2) { // Bashers
+      const categorySlug = product.categoryId === null ? undefined : categorySlugById.get(product.categoryId);
+      if (categorySlug === 'bashers') {
         chosenImage = basherImagePool[basherIndex % basherImagePool.length];
         basherIndex++;
-      } else if (product.categoryId === 1) { // Crawlers
+      } else if (categorySlug === 'crawlers') {
         chosenImage = IMAGES.tanCrawler;
-      } else if (product.categoryId === 3) { // Drift
+      } else if (categorySlug === 'drift') {
         chosenImage = IMAGES.purpleDrift;
-      } else if (product.categoryId === 4) { // On-road
+      } else if (categorySlug === 'on-road') {
         chosenImage = IMAGES.yellowSupercar;
-      } else if (product.categoryId === 5) { // Construction
+      } else if (categorySlug === 'construction') {
         chosenImage = IMAGES.yellowExcavator;
-      } else if (product.categoryId === 6) { // Marine
+      } else if (categorySlug === 'marine') {
         chosenImage = IMAGES.catamaranBoat;
+      } else if (categorySlug === 'spare-parts') {
+        chosenImage = IMAGES.parts;
+      } else if (categorySlug === 'accessories') {
+        chosenImage = IMAGES.accessories;
       } else {
         chosenImage = IMAGES.greenBuggy;
       }
@@ -174,10 +185,11 @@ async function run() {
   }
 
   console.log('Finished updating all products with diverse, unique images!');
-  process.exit(0);
+  await pool.end();
 }
 
-run().catch((err) => {
+run().catch(async (err) => {
   console.error(err);
-  process.exit(1);
+  await global._postgresPool?.end();
+  process.exitCode = 1;
 });

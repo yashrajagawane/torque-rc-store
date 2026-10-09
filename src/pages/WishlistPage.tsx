@@ -3,14 +3,19 @@ import { Heart, ShoppingCart, Trash2, ArrowRight, ArrowLeft } from 'lucide-react
 import { useWishlistStore } from '../store/wishlistStore';
 import { useCartStore } from '../store/cartStore';
 import { formatCurrency } from '../lib/utils';
+import { useVisibleCart } from '../cart/useVisibleCart';
 
 export const WishlistPage = () => {
   const items = useWishlistStore((state) => state.items);
   const removeItem = useWishlistStore((state) => state.removeItem);
   const clearWishlist = useWishlistStore((state) => state.clearWishlist);
   const addItemToCart = useCartStore((state) => state.addItem);
+  const { visibility } = useVisibleCart();
+  const storeCartLocked = useCartStore((state) => Boolean(state.pendingMerge || state.legacyMergeKey || (state.mode === 'guest' && state.guestItemsOwnerId)));
+  const cartLocked = visibility === 'loading' || visibility === 'recovery' || storeCartLocked;
 
   const handleMoveToCart = (item: any) => {
+    if (cartLocked) return;
     addItemToCart({
       id: item.id,
       slug: item.slug,
@@ -126,7 +131,8 @@ export const WishlistPage = () => {
                 <div className="p-5 pt-0 border-t border-white/5 mt-auto">
                   <button
                     onClick={() => handleMoveToCart(item)}
-                    className="btn-primary w-full py-3 text-xs flex items-center justify-center gap-2"
+                    disabled={cartLocked}
+                    className="btn-primary w-full py-3 text-xs flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     <span className="skew-x-[10deg] flex items-center gap-2 [word-spacing:0.15em]">
                       <ShoppingCart size={14} /> Move to Garage Cart

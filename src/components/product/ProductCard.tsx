@@ -4,6 +4,7 @@ import { motion } from 'framer-motion';
 import { cn, formatCurrency } from '../../lib/utils';
 import { useCartStore } from '../../store/cartStore';
 import { useWishlistStore } from '../../store/wishlistStore';
+import { useVisibleCart } from '../../cart/useVisibleCart';
 
 interface ProductCardProps {
   id: number;
@@ -31,6 +32,9 @@ export const ProductCard = ({
   featured,
 }: ProductCardProps) => {
   const addItem = useCartStore((state) => state.addItem);
+  const { visibility } = useVisibleCart();
+  const storeCartLocked = useCartStore((state) => Boolean(state.pendingMerge || state.legacyMergeKey || (state.mode === 'guest' && state.guestItemsOwnerId)));
+  const cartLocked = visibility === 'loading' || visibility === 'recovery' || storeCartLocked;
   const toggleWishlist = useWishlistStore((state) => state.toggleItem);
   const isWishlisted = useWishlistStore((state) => state.isInWishlist(id));
 
@@ -129,7 +133,9 @@ export const ProductCard = ({
           </span>
           <button 
             onClick={handleAddToCart}
-            className="w-8 h-8 md:w-10 md:h-10 bg-white text-black flex items-center justify-center rounded-sm skew-x-[-10deg] hover:bg-accent hover:text-white transition-all"
+            disabled={cartLocked}
+            title={cartLocked ? 'Cart recovery is in progress' : 'Add to cart'}
+            className="w-8 h-8 md:w-10 md:h-10 bg-white text-black flex items-center justify-center rounded-sm skew-x-[-10deg] hover:bg-accent hover:text-white transition-all disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <div className="skew-x-[10deg]">
               <ShoppingCart size={16} className="md:w-[18px]" />

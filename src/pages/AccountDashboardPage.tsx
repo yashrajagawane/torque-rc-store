@@ -1,279 +1,174 @@
-import { useState } from 'react';
-import { User, Shield, Wrench, Package, Heart, LogOut, ChevronRight, Gauge, Cpu } from 'lucide-react';
-import { Link } from 'react-router-dom';
-import { useCartStore } from '../store/cartStore';
+import { useEffect, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import { LogOut, Package, Shield, UserRound } from 'lucide-react';
+import type { User } from '@supabase/supabase-js';
+import { useAuth } from '../auth/AuthContext';
+import { signOutCurrentSession } from '../auth/signOut';
+import { supabase } from '../lib/supabase';
+import { useVisibleCart } from '../cart/useVisibleCart';
+import { formatOrderCurrency } from '../lib/order-format';
+
+interface AccountInfo {
+  id: string;
+  email: string | null;
+  emailVerified: boolean;
+  displayName: string | null;
+  owner: boolean;
+}
+interface CustomerOrder {
+  id: number;
+  total: string;
+  currency: string;
+  paymentStatus: string | null;
+  fulfillmentStatus: string;
+  createdAt: string | null;
+  items: Array<{ productName: string; quantity: number; price: string }>;
+}
+
+function displayName(user: User) {
+  const value = user.user_metadata?.display_name;
+  return typeof value === 'string' && value.trim() ? value.trim() : user.email || 'RC MEGA customer';
+}
 
 export const AccountDashboardPage = () => {
-  const [activeTab, setActiveTab] = useState<'overview' | 'orders' | 'fleet'>('overview');
-  const cartItems = useCartStore((state) => state.items);
+  const { user, session } = useAuth();
+  const navigate = useNavigate();
+  const { items: cartItems } = useVisibleCart();
+  const [account, setAccount] = useState<AccountInfo | null>(null);
+  const [accountError, setAccountError] = useState('');
+  const [signingOut, setSigningOut] = useState(false);
+  const [orders, setOrders] = useState<CustomerOrder[]>([]);
+  const [ordersOwnerId, setOrdersOwnerId] = useState<string | null>(null);
+  const [ordersLoading, setOrdersLoading] = useState(true);
+  const [ordersError, setOrdersError] = useState('');
 
-  const mockOrders = [
-    {
-      id: 'ORD-98214',
-      date: 'Sep 24, 2026',
-      total: '$429.00',
-      status: 'In Transit',
-      items: 'RGT EX86190 Rescuer 1:10 Crawler'
-    },
-    {
-      id: 'ORD-97542',
-      date: 'Sep 12, 2026',
-      total: '$189.50',
-      status: 'Delivered',
-      items: 'MJX Hyper Go 14301 Drift RTR + LiPo Battery'
+  useEffect(() => {
+    let active = true;
+    async function loadAccount() {
+      const { data } = await supabase!.auth.getSession();
+      const token = data.session?.access_token;
+      if (!token) {
+        if (active) setAccountError('Your session expired. Sign in again to continue.');
+        return;
+      }
+      try {
+        const response = await fetch('/api/account/me', { headers: { Authorization: `Bearer ${token}` } });
+        const payload = await response.json().catch(() => ({}));
+        if (response.status === 401) {
+          await supabase!.auth.signOut({ scope: 'local' }).catch(() => undefined);
+          if (active) navigate('/login', { replace: true });
+          return;
+        }
+        if (!response.ok) throw new Error(payload.error || 'Account information is temporarily unavailable.');
+        if (active) setAccount(payload as AccountInfo);
+      } catch (cause) {
+        if (active) setAccountError(cause instanceof Error ? cause.message : 'Account information is temporarily unavailable.');
+      }
     }
-  ];
+    void loadAccount();
+    return () => { active = false; };
+  }, [user?.id, navigate]);
 
-  const fleet = [
-    {
-      name: 'RGT EX86190 Rescuer',
-      scale: '1:10 SCALE',
-      status: 'Active Field Unit',
-      topSpeed: '32 KM/H',
-      battery: '3S 5200MAH'
-    },
-    {
-      name: 'MJX Hyper Go 14301',
-      scale: '1:14 SCALE',
-      status: 'Tuned For Drift',
-      topSpeed: '45 KM/H',
-      battery: '2S 2000MAH'
+  useEffect(() => {
+    let active = true;
+    setOrdersLoading(true);
+    setOrdersError('');
+    if (!session?.access_token) {
+      setOrdersError('Your session expired. Sign in again to view your orders.');
+      setOrdersOwnerId(user?.id || null);
+      setOrdersLoading(false);
+      return;
     }
-  ];
+    fetch('/api/orders/mine', { headers: { Authorization: `Bearer ${session.access_token}` } })
+      .then(async (response) => {
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error || 'Order history is temporarily unavailable.');
+        if (active) {
+          setOrders(Array.isArray(payload.orders) ? payload.orders as CustomerOrder[] : []);
+          setOrdersOwnerId(user?.id || null);
+        }
+      })
+      .catch((cause) => {
+        if (active) {
+          setOrdersError(cause instanceof Error ? cause.message : 'Order history is temporarily unavailable.');
+          setOrdersOwnerId(user?.id || null);
+        }
+      })
+      .finally(() => { if (active) setOrdersLoading(false); });
+    return () => { active = false; };
+  }, [session?.access_token, user?.id]);
+
+  const visibleOrders = ordersOwnerId === user?.id ? orders : [];
+  const visibleOrdersLoading = ordersOwnerId !== user?.id || ordersLoading;
+
+  async function signOut() {
+    if (!supabase) return;
+    setSigningOut(true);
+    const { error } = await signOutCurrentSession(supabase);
+    setSigningOut(false);
+    if (error) {
+      setAccountError(error instanceof Error ? error.message : 'Could not sign out. Please try again.');
+      return;
+    }
+    navigate('/login', { replace: true });
+  }
 
   return (
     <div className="pt-32 pb-24 min-h-screen">
-      <div className="container px-4 md:px-6 max-w-6xl">
-        {/* Breadcrumb */}
-        <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground mb-6 [word-spacing:0.15em]">
-          <Link to="/" className="hover:text-white transition-colors">Home</Link>
-          <span>/</span>
-          <span className="text-white">Garage Dashboard</span>
-        </div>
-
-        {/* Dashboard Header */}
-        <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 pb-8 border-b border-white/10 mb-10">
+      <div className="container px-4 md:px-6 max-w-5xl">
+        <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-5 pb-8 border-b border-white/10 mb-10">
           <div>
-            <div className="flex items-center gap-3 mb-2">
-              <span className="text-accent font-mono text-xs font-bold uppercase tracking-[0.3em] [word-spacing:0.2em]">
-                Telemetry & Garage Control
-              </span>
-              <span className="bg-emerald-500/20 text-emerald-400 text-[10px] font-bold px-2.5 py-0.5 rounded-full uppercase tracking-wider">
-                Online
-              </span>
-            </div>
-            <h1 className="text-2xl sm:text-3xl md:text-4xl [word-spacing:0.25em]">
-              PILOT GARAGE DASHBOARD
-            </h1>
+            <p className="text-accent font-mono text-xs font-bold uppercase tracking-[0.3em] mb-2">Customer Account</p>
+            <h1 className="text-3xl md:text-4xl italic">PILOT GARAGE</h1>
           </div>
-          <div className="flex items-center gap-3">
-            <Link
-              to="/collections/all-rc-models"
-              className="btn-primary text-xs py-3 px-5"
-            >
-              <span className="skew-x-[10deg] flex items-center gap-2 [word-spacing:0.15em]">
-                Browse Showroom
-              </span>
-            </Link>
-          </div>
+          <button onClick={signOut} disabled={signingOut} className="btn-secondary px-5 py-3 text-xs disabled:opacity-50">
+            <span className="skew-x-[10deg] flex items-center gap-2"><LogOut size={15} />{signingOut ? 'SIGNING OUT…' : 'SIGN OUT'}</span>
+          </button>
         </div>
 
-        {/* Metric Cards Grid */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-10">
-          <div className="glass-card p-5 border border-white/5">
-            <div className="flex items-center justify-between mb-3 text-muted-foreground">
-              <span className="text-[10px] font-bold uppercase tracking-widest [word-spacing:0.15em]">Fleet Units</span>
-              <Gauge size={18} className="text-accent" />
-            </div>
-            <div className="text-2xl md:text-3xl font-black italic tracking-normal [word-spacing:0.2em]">02</div>
-            <span className="text-[10px] text-muted-foreground [word-spacing:0.1em]">Registered machines</span>
-          </div>
+        {accountError && <p role="alert" className="glass-card p-4 border border-red-500/30 text-red-300 text-sm mb-6">{accountError}</p>}
 
-          <div className="glass-card p-5 border border-white/5">
-            <div className="flex items-center justify-between mb-3 text-muted-foreground">
-              <span className="text-[10px] font-bold uppercase tracking-widest [word-spacing:0.15em]">Pit Stop Orders</span>
-              <Package size={18} className="text-accent" />
-            </div>
-            <div className="text-2xl md:text-3xl font-black italic tracking-normal [word-spacing:0.2em]">02</div>
-            <span className="text-[10px] text-muted-foreground [word-spacing:0.1em]">1 shipment in transit</span>
-          </div>
-
-          <div className="glass-card p-5 border border-white/5">
-            <div className="flex items-center justify-between mb-3 text-muted-foreground">
-              <span className="text-[10px] font-bold uppercase tracking-widest [word-spacing:0.15em]">Cart Garage</span>
-              <Wrench size={18} className="text-accent" />
-            </div>
-            <div className="text-2xl md:text-3xl font-black italic tracking-normal [word-spacing:0.2em]">{cartItems.length}</div>
-            <span className="text-[10px] text-muted-foreground [word-spacing:0.1em]">Items ready for checkout</span>
-          </div>
-
-          <div className="glass-card p-5 border border-white/5">
-            <div className="flex items-center justify-between mb-3 text-muted-foreground">
-              <span className="text-[10px] font-bold uppercase tracking-widest [word-spacing:0.15em]">Pilot Tier</span>
-              <Shield size={18} className="text-accent" />
-            </div>
-            <div className="text-2xl md:text-3xl font-black italic tracking-normal [word-spacing:0.2em]">PRO</div>
-            <span className="text-[10px] text-muted-foreground [word-spacing:0.1em]">Enthusiast member</span>
-          </div>
-        </div>
-
-        {/* Tabs & Content */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          {/* Main Column */}
-          <div className="lg:col-span-2 space-y-8">
-            {/* Active Fleet */}
-            <div className="glass-card p-6 border border-white/5">
-              <div className="flex items-center justify-between pb-4 border-b border-white/5 mb-6">
-                <div>
-                  <h3 className="text-base sm:text-lg mb-1 italic tracking-normal [word-spacing:0.2em]">
-                    CURRENT FLEET VEHICLES
-                  </h3>
-                  <p className="text-xs text-muted-foreground [word-spacing:0.12em]">
-                    Vehicles mapped to your garage telemetry
-                  </p>
-                </div>
-                <Link
-                  to="/collections/all-rc-models"
-                  className="text-xs font-bold text-accent hover:underline [word-spacing:0.15em]"
-                >
-                  + Add Machine
-                </Link>
-              </div>
-
-              <div className="space-y-4">
-                {fleet.map((vehicle, idx) => (
-                  <div
-                    key={idx}
-                    className="p-4 bg-white/[0.02] border border-white/5 rounded-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4"
-                  >
-                    <div>
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="text-[10px] font-bold text-accent uppercase tracking-wider [word-spacing:0.15em]">
-                          {vehicle.scale}
-                        </span>
-                        <span className="text-white/20">•</span>
-                        <span className="text-[10px] text-muted-foreground uppercase tracking-wider [word-spacing:0.1em]">
-                          {vehicle.status}
-                        </span>
-                      </div>
-                      <h4 className="text-sm font-bold uppercase tracking-normal italic [word-spacing:0.18em]">
-                        {vehicle.name}
-                      </h4>
-                    </div>
-                    <div className="flex items-center gap-4 text-xs">
-                      <div className="text-right">
-                        <div className="text-muted-foreground text-[10px] uppercase tracking-wider [word-spacing:0.1em]">Top Speed</div>
-                        <div className="font-bold text-white [word-spacing:0.1em]">{vehicle.topSpeed}</div>
-                      </div>
-                      <div className="text-right">
-                        <div className="text-muted-foreground text-[10px] uppercase tracking-wider [word-spacing:0.1em]">Battery Pack</div>
-                        <div className="font-bold text-accent [word-spacing:0.1em]">{vehicle.battery}</div>
-                      </div>
-                    </div>
-                  </div>
-                ))}
+        <div className="grid md:grid-cols-3 gap-6">
+          <section className="glass-card p-6 border border-white/5 md:col-span-2">
+            <div className="flex items-center gap-4 pb-6 border-b border-white/5">
+              <div className="w-14 h-14 bg-accent/10 border border-accent/30 flex items-center justify-center text-accent"><UserRound size={25} /></div>
+              <div className="min-w-0">
+                <h2 className="text-lg font-bold uppercase italic truncate">{account?.displayName || displayName(user!)}</h2>
+                <p className="text-sm text-muted-foreground break-all">{account?.email || user?.email}</p>
               </div>
             </div>
-
-            {/* Orders Section */}
-            <div className="glass-card p-6 border border-white/5">
-              <div className="flex items-center justify-between pb-4 border-b border-white/5 mb-6">
-                <div>
-                  <h3 className="text-base sm:text-lg mb-1 italic tracking-normal [word-spacing:0.2em]">
-                    RECENT DISPATCHES
-                  </h3>
-                  <p className="text-xs text-muted-foreground [word-spacing:0.12em]">
-                    Order fulfillment and delivery tracking
-                  </p>
-                </div>
-              </div>
-
-              <div className="space-y-4">
-                {mockOrders.map((ord) => (
-                  <div
-                    key={ord.id}
-                    className="p-4 bg-white/[0.02] border border-white/5 rounded-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4"
-                  >
-                    <div>
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="font-mono text-xs font-bold text-white [word-spacing:0.1em]">{ord.id}</span>
-                        <span className="text-white/20">•</span>
-                        <span className="text-xs text-muted-foreground [word-spacing:0.1em]">{ord.date}</span>
-                      </div>
-                      <p className="text-xs text-muted-foreground italic [word-spacing:0.12em]">{ord.items}</p>
-                    </div>
-                    <div className="flex items-center gap-4">
-                      <div className="text-right">
-                        <div className="font-bold text-sm [word-spacing:0.1em]">{ord.total}</div>
-                        <span className="text-[10px] font-bold text-accent uppercase tracking-wider [word-spacing:0.1em]">{ord.status}</span>
-                      </div>
-                      <ChevronRight size={16} className="text-muted-foreground" />
-                    </div>
-                  </div>
-                ))}
-              </div>
+            <div className="pt-5 flex flex-wrap items-center gap-3 text-xs">
+              <span className="px-3 py-2 bg-white/5 border border-white/10 text-muted-foreground uppercase tracking-wider">Customer account</span>
+              <span className={`px-3 py-2 border uppercase tracking-wider ${account?.emailVerified ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300' : 'bg-amber-500/10 border-amber-500/30 text-amber-300'}`}>
+                {account?.emailVerified ? 'Email verified' : 'Email verification pending'}
+              </span>
+              {account?.owner && <span className="px-3 py-2 bg-accent/10 border border-accent/30 text-accent uppercase tracking-wider">Owner access</span>}
             </div>
-          </div>
+          </section>
 
-          {/* Sidebar Info */}
-          <div className="space-y-6">
-            <div className="glass-card p-6 border border-white/5">
-              <div className="flex items-center gap-4 pb-6 border-b border-white/5 mb-6">
-                <div className="w-14 h-14 bg-white/5 rounded-sm skew-x-[-10deg] flex items-center justify-center border border-white/10 text-accent font-black text-xl">
-                  <span className="skew-x-[10deg]">RC</span>
-                </div>
-                <div>
-                  <h4 className="text-base font-bold italic tracking-normal uppercase [word-spacing:0.2em]">
-                    Pilot agawaneyash
-                  </h4>
-                  <p className="text-xs text-muted-foreground [word-spacing:0.1em]">
-                    agawaneyash865@gmail.com
-                  </p>
-                </div>
-              </div>
+          <section className="glass-card p-6 border border-white/5">
+            <div className="flex items-center gap-3 mb-4"><Package className="text-accent" /><h2 className="text-sm font-bold uppercase italic">Order history</h2></div>
+            {visibleOrdersLoading ? <p role="status" className="text-sm text-muted-foreground">Loading your orders…</p> : ordersError ? <p role="alert" className="text-sm text-red-300">{ordersError}</p> : visibleOrders.length === 0 ? <p className="text-sm text-muted-foreground">No orders yet.</p> : <div className="space-y-4">
+              {visibleOrders.map((order) => <article key={order.id} className="border-t border-white/10 pt-4">
+                <div className="flex flex-wrap justify-between gap-2"><strong className="text-xs uppercase">Order #{order.id}</strong><span className="text-xs text-muted-foreground">{order.createdAt ? new Date(order.createdAt).toLocaleDateString() : ''}</span></div>
+                <p className="mt-2 text-xs text-muted-foreground">Payment: {order.paymentStatus || 'UNPAID'} · Fulfillment: {order.fulfillmentStatus}</p>
+                <ul className="mt-2 space-y-1">{order.items.map((item, index) => <li key={`${order.id}-${index}`} className="text-xs text-muted-foreground">{item.productName} × {item.quantity} · {formatOrderCurrency(Number(item.price) * item.quantity)}</li>)}</ul>
+                <p className="mt-2 text-sm font-bold">Total {formatOrderCurrency(order.total)}</p>
+              </article>)}
+            </div>}
+          </section>
 
-              <div className="space-y-3 text-xs">
-                <div className="flex justify-between py-2 border-b border-white/5">
-                  <span className="text-muted-foreground [word-spacing:0.1em]">Garage Tier</span>
-                  <span className="font-bold text-accent [word-spacing:0.1em]">Pro Mechanic</span>
-                </div>
-                <div className="flex justify-between py-2 border-b border-white/5">
-                  <span className="text-muted-foreground [word-spacing:0.1em]">Shipping Region</span>
-                  <span className="font-bold [word-spacing:0.1em]">Asia Southeast (Global)</span>
-                </div>
-                <div className="flex justify-between py-2 border-b border-white/5">
-                  <span className="text-muted-foreground [word-spacing:0.1em]">Warranty Cover</span>
-                  <span className="font-bold text-emerald-400 [word-spacing:0.1em]">12 Months Active</span>
-                </div>
-              </div>
+          <section className="glass-card p-6 border border-white/5">
+            <div className="flex items-center gap-3 mb-3"><Shield className="text-accent" /><h2 className="text-sm font-bold uppercase italic">Account security</h2></div>
+            <p className="text-xs leading-relaxed text-muted-foreground">Your account is authenticated with Supabase. Keep your password private and sign out on shared devices.</p>
+            <Link to="/forgot-password" className="inline-block text-xs text-accent mt-4 hover:underline">Reset password</Link>
+          </section>
 
-              <div className="pt-6">
-                <button
-                  onClick={() => alert('Account settings saved.')}
-                  className="w-full btn-secondary text-xs py-3"
-                >
-                  <span className="skew-x-[10deg] [word-spacing:0.15em]">Edit Pilot Profile</span>
-                </button>
-              </div>
-            </div>
-
-            <div className="glass-card p-6 border border-accent/20 bg-accent/5">
-              <div className="flex items-center gap-2 text-accent font-bold text-xs uppercase tracking-wider mb-2 [word-spacing:0.15em]">
-                <Cpu size={16} /> Need Tuning Advice?
-              </div>
-              <p className="text-xs text-muted-foreground mb-4 leading-relaxed [word-spacing:0.12em]">
-                Our certified RC specialists are available on WhatsApp for setup tuning, brushless ESC pairing, and crawler gearing.
-              </p>
-              <a
-                href="https://wa.me/"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center justify-center w-full bg-accent text-white font-black text-xs uppercase tracking-wider py-3 rounded-sm skew-x-[-10deg] hover:bg-white hover:text-black transition-colors"
-              >
-                <span className="skew-x-[10deg] [word-spacing:0.15em]">Contact Pit Crew</span>
-              </a>
-            </div>
-          </div>
+          <section className="glass-card p-6 border border-white/5">
+            <h2 className="text-sm font-bold uppercase italic mb-3">Shopping garage</h2>
+            <p className="text-sm text-muted-foreground mb-4">{cartItems.length} item{cartItems.length === 1 ? '' : 's'} currently in your cart.</p>
+            <Link to="/collections/all-rc-models" className="text-xs text-accent hover:underline">Browse the collection →</Link>
+          </section>
         </div>
       </div>
     </div>

@@ -17,6 +17,14 @@ import { MobileBottomNav } from './components/layout/MobileBottomNav';
 import { CartDrawer } from './components/cart/CartDrawer';
 import { SearchOverlay } from './components/search/SearchOverlay';
 import { useEffect, useState } from 'react';
+import { AuthProvider } from './auth/AuthContext';
+import { RequireAuth } from './auth/RequireAuth';
+import { AuthCallbackPage, LoginPage, PasswordRecoveryPage, PasswordResetPage, RegisterPage } from './pages/AuthPages';
+import { RequireOwner } from './auth/RequireOwner';
+import { AdminProductsPage } from './pages/AdminProductsPage';
+import { CheckoutPage } from './pages/CheckoutPage';
+import { AdminOrdersPage } from './pages/AdminOrdersPage';
+import { CartSync } from './cart/CartSync';
 
 const ScrollToTop = () => {
   const { pathname } = useLocation();
@@ -84,6 +92,8 @@ export default function App() {
     <BrowserRouter>
       <ScrollToTop />
       <div className="min-h-screen bg-background flex flex-col pb-16 lg:pb-0">
+        <AuthProvider>
+        <CartSync />
         <Header onOpenCart={() => setIsCartOpen(true)} onOpenSearch={() => setIsSearchOpen(true)} />
         
         <main className="flex-grow">
@@ -99,7 +109,15 @@ export default function App() {
             <Route path="/about" element={<AboutPage />} />
             <Route path="/contact" element={<ContactPage />} />
             <Route path="/wishlist" element={<WishlistPage />} />
-            <Route path="/account" element={<AccountDashboardPage />} />
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/register" element={<RegisterPage />} />
+            <Route path="/forgot-password" element={<PasswordRecoveryPage />} />
+            <Route path="/account/reset-password" element={<PasswordResetPage />} />
+            <Route path="/auth/callback" element={<AuthCallbackPage />} />
+            <Route path="/account" element={<RequireAuth><AccountDashboardPage /></RequireAuth>} />
+            <Route path="/checkout" element={<RequireAuth><CheckoutPage /></RequireAuth>} />
+            <Route path="/admin" element={<RequireOwner><AdminProductsPage /></RequireOwner>} />
+            <Route path="/admin/orders" element={<RequireOwner><AdminOrdersPage /></RequireOwner>} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </main>
@@ -109,6 +127,7 @@ export default function App() {
         
         <CartDrawer isOpen={isCartOpen} onClose={() => setIsCartOpen(false)} />
         <SearchOverlay isOpen={isSearchOpen} onClose={() => setIsSearchOpen(false)} />
+        </AuthProvider>
       </div>
     </BrowserRouter>
   );

@@ -3,12 +3,16 @@ import { ShoppingCart, Heart, ArrowLeft, Truck, ShieldCheck, Zap, Info, MessageS
 import { formatCurrency, cn } from '../lib/utils';
 import { useCartStore } from '../store/cartStore';
 import { useWishlistStore } from '../store/wishlistStore';
+import { useVisibleCart } from '../cart/useVisibleCart';
 
 export const ProductDetailPage = ({ slug }: { slug: string }) => {
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [quantity, setQuantity] = useState(1);
   const addItem = useCartStore((state) => state.addItem);
+  const { visibility } = useVisibleCart();
+  const storeCartLocked = useCartStore((state) => Boolean(state.pendingMerge || state.legacyMergeKey || (state.mode === 'guest' && state.guestItemsOwnerId)));
+  const cartLocked = visibility === 'loading' || visibility === 'recovery' || storeCartLocked;
   const toggleWishlist = useWishlistStore((state) => state.toggleItem);
   const isInWishlist = useWishlistStore((state) => state.isInWishlist);
 
@@ -124,17 +128,20 @@ export const ProductDetailPage = ({ slug }: { slug: string }) => {
                 <div className="flex items-center justify-between bg-[#111] rounded-sm skew-x-[-10deg] border border-white/10 px-4 h-14">
                   <button 
                     onClick={() => setQuantity(Math.max(1, quantity - 1))}
+                    disabled={cartLocked}
                     className="w-10 h-full text-white hover:text-accent transition-colors skew-x-[10deg] text-xl"
                   >-</button>
                   <span className="font-bold text-base skew-x-[10deg]">{quantity}</span>
                   <button 
                     onClick={() => setQuantity(quantity + 1)}
+                    disabled={cartLocked}
                     className="w-10 h-full text-white hover:text-accent transition-colors skew-x-[10deg] text-xl"
                   >+</button>
                 </div>
                 <button 
                   onClick={handleAddToCart}
-                  className="btn-primary flex-grow h-14 flex items-center justify-center gap-3"
+                  disabled={cartLocked}
+                  className="btn-primary flex-grow h-14 flex items-center justify-center gap-3 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   <span className="skew-x-[10deg] flex items-center gap-2">
                     <ShoppingCart size={20} /> ADD TO GARAGE

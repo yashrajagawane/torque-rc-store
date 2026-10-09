@@ -1,6 +1,8 @@
+import 'dotenv/config';
 import { drizzle } from 'drizzle-orm/node-postgres';
-import { Pool } from 'pg';
+import { Pool, type PoolConfig } from 'pg';
 import * as schema from './schema.ts';
+import { resolveDatabaseSettings } from './config.ts';
 
 declare global {
   var _postgresPool: Pool | undefined;
@@ -8,14 +10,25 @@ declare global {
 
 export const createPool = () => {
   if (!global._postgresPool) {
-    global._postgresPool = new Pool({
-      host: process.env.SQL_HOST,
-      user: process.env.SQL_USER,
-      password: process.env.SQL_PASSWORD,
-      database: process.env.SQL_DB_NAME,
-      max: 10,
-      connectionTimeoutMillis: 15000,
-    });
+    const settings = resolveDatabaseSettings('runtime');
+    const poolConfig: PoolConfig = settings.url
+      ? {
+          connectionString: settings.url,
+          ssl: settings.ssl,
+          max: 10,
+          connectionTimeoutMillis: 15000,
+        }
+      : {
+          host: settings.host,
+          port: settings.port,
+          database: settings.database,
+          user: settings.user,
+          password: settings.password,
+          ssl: settings.ssl,
+          max: 10,
+          connectionTimeoutMillis: 15000,
+        };
+    global._postgresPool = new Pool(poolConfig);
 
     global._postgresPool.on('error', (err) => {
       console.error('Unexpected error on idle SQL pool client:', err);

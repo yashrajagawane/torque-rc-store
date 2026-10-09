@@ -3,10 +3,10 @@ import { ShoppingCart, Heart, Search, Menu, X, User } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '../../lib/utils';
-import { useCartStore } from '../../store/cartStore';
 import { useWishlistStore } from '../../store/wishlistStore';
 import { CartDrawer } from '../cart/CartDrawer';
 import { SearchOverlay } from '../search/SearchOverlay';
+import { useVisibleCart } from '../../cart/useVisibleCart';
 
 export const AnnouncementBar = () => {
   return (
@@ -38,7 +38,7 @@ export const Header = ({ onOpenCart, onOpenSearch }: HeaderProps) => {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   
   const location = useLocation();
-  const cartItems = useCartStore((state) => state.items);
+  const { items: cartItems } = useVisibleCart();
   const cartCount = cartItems.reduce((acc, item) => acc + item.quantity, 0);
   const wishlistItems = useWishlistStore((state) => state.items);
   const wishlistCount = wishlistItems.length;

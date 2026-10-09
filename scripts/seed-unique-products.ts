@@ -1,5 +1,4 @@
-import dotenv from 'dotenv';
-dotenv.config();
+import 'dotenv/config';
 
 import { createPool } from '../src/db/index.ts';
 import { drizzle } from 'drizzle-orm/node-postgres';
@@ -42,17 +41,19 @@ async function seedUniqueProducts() {
   const pool = createPool();
   const db = drizzle(pool, { schema });
 
-  console.log('Clearing old product inventory to enforce 100% unique items and images...');
-  try {
-    await pool.query('DELETE FROM order_items;');
-  } catch (e) {}
-  await pool.query('DELETE FROM products;');
-
   const categories = await db.select().from(schema.categories);
   const brands = await db.select().from(schema.brands);
 
-  const getCatId = (slug: string) => categories.find((c) => c.slug === slug)?.id || categories[0].id;
-  const getBrandId = (slug: string) => brands.find((b) => b.slug === slug)?.id || brands[0].id;
+  const getCatId = (slug: string) => {
+    const category = categories.find((item) => item.slug === slug);
+    if (!category) throw new Error(`Required category "${slug}" is missing. Run the reference-data seed first.`);
+    return category.id;
+  };
+  const getBrandId = (slug: string) => {
+    const brand = brands.find((item) => item.slug === slug);
+    if (!brand) throw new Error(`Required brand "${slug}" is missing. Run the reference-data seed first.`);
+    return brand.id;
+  };
 
   const UNIQUE_PRODUCTS = [
     // 1. Rock Crawlers
@@ -571,15 +572,20 @@ async function seedUniqueProducts() {
   ];
 
   for (const item of UNIQUE_PRODUCTS) {
-    await db.insert(schema.products).values(item);
-    console.log(`Inserted: [${item.slug}] => ${item.thumbnail}`);
+    const [inserted] = await db
+      .insert(schema.products)
+      .values(item)
+      .onConflictDoNothing({ target: schema.products.slug })
+      .returning({ slug: schema.products.slug });
+    console.log(inserted ? `Inserted: [${item.slug}]` : `Preserved existing product: [${item.slug}]`);
   }
 
-  console.log(`Successfully seeded ${UNIQUE_PRODUCTS.length} strictly unique products with 100% unique photos!`);
-  process.exit(0);
+  console.log(`Finished safe product seeding (${UNIQUE_PRODUCTS.length} catalog entries checked; existing products were preserved).`);
+  await pool.end();
 }
 
-seedUniqueProducts().catch((err) => {
+seedUniqueProducts().catch(async (err) => {
   console.error(err);
-  process.exit(1);
+  await global._postgresPool?.end();
+  process.exitCode = 1;
 });

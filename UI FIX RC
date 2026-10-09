@@ -1,0 +1,515 @@
+# 🏁 RC MEGA — UI/Frontend Bug-Fix Master Plan
+
+> **Project:** Torque RC Store (`torque-rc-store`)
+> **Date:** 2026-10-09
+> **Scope:** Pure CSS / Layout / Spacing / Overlap / Responsive bugs — no backend or logic changes.
+> **Total Bugs:** 22 across 18 files
+> **Execution:** 4 Phases, ordered by severity (Critical → High → Medium → Low)
+
+---
+
+## Phase 1 — Critical: Layout Breakage & Content Inaccessible
+
+These bugs cause content to be permanently hidden, overlapped, or non-interactive for real users on common devices.
+
+---
+
+### BUG-01 · Footer permanently hidden behind Mobile Bottom Nav on iOS
+| | |
+|---|---|
+| **Severity** | 🔴 Critical |
+| **Type** | Spacing / Safe-Area Overlap |
+| **Files** | [`App.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/App.tsx#L89) · [`MobileBottomNav.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/components/layout/MobileBottomNav.tsx#L23) |
+| **Lines** | `App.tsx:89` — `pb-16` · `MobileBottomNav.tsx:23` — `h-16` + `pb-safe` |
+
+**Root Cause:** The root wrapper (`App.tsx:89`) reserves `pb-16` (64px) for the fixed bottom nav. But the nav (`MobileBottomNav.tsx:23`) also adds `pb-safe` for the iPhone home indicator, making the bar **taller** than 64px. The footer's bottom portion is permanently clipped.
+
+**Fix:**
+```diff
+ // App.tsx:89
+-<div className="min-h-screen bg-background flex flex-col pb-16 lg:pb-0">
++<div className="min-h-screen bg-background flex flex-col pb-[calc(4rem+env(safe-area-inset-bottom))] lg:pb-0">
+```
+
+---
+
+### BUG-02 · Z-Index collision: Cart Drawer vs. Filter Drawer
+| | |
+|---|---|
+| **Severity** | 🔴 Critical |
+| **Type** | Overlap / Z-Index Conflict |
+| **Files** | [`CartDrawer.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/components/cart/CartDrawer.tsx#L25-L34) · [`CollectionPage.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/pages/CollectionPage.tsx#L281-L288) |
+| **Lines** | `CartDrawer.tsx:25` `z-[100]`, `:34` `z-[101]` · `CollectionPage.tsx:281` `z-[100]`, `:288` `z-[101]` |
+
+**Root Cause:** Both drawers use the exact same z-index pair (`z-[100]` backdrop, `z-[101]` panel). If a user triggers one while the other is open, they share the same stacking plane and visually collide.
+
+**Fix:** Establish a clear z-index hierarchy. The Cart Drawer should always sit **above** the Filter Drawer since it's globally accessible:
+```diff
+ // CartDrawer.tsx:25 — backdrop
+-className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100]"
++className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[110]"
+
+ // CartDrawer.tsx:34 — panel
+-className="fixed top-0 right-0 h-full w-full max-w-md bg-card border-l border-white/5 z-[101] flex flex-col"
++className="fixed top-0 right-0 h-full w-full max-w-md bg-card border-l border-white/5 z-[111] flex flex-col"
+```
+The Filter Drawer (`CollectionPage.tsx:281,288`) stays at `z-[100]`/`z-[101]` — no change needed there.
+
+---
+
+### BUG-03 · Product Detail page content hidden under fixed header on mobile
+| | |
+|---|---|
+| **Severity** | 🔴 Critical |
+| **Type** | Spacing / Header Overlap |
+| **Files** | [`ProductDetailPage.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/pages/ProductDetailPage.tsx#L49) |
+| **Lines** | `ProductDetailPage.tsx:49` — `pt-24 md:pt-32` |
+
+**Root Cause:** The header is `fixed top-0` and includes the `AnnouncementBar` (~28px) + the main nav bar (~52px on mobile). That's ~80px total. But the page uses `pt-24` (96px) on mobile which seems fine at first glance — except the breadcrumb is `hidden md:flex` (Line 52), so on mobile the **first visible content** is the product image at Line 63 which has no extra top spacing. When the header shrinks on scroll (`py-2`), it can overlap the top of the image container.
+
+**Fix:**
+```diff
+ // ProductDetailPage.tsx:49
+-<div className="pt-24 md:pt-32 pb-24">
++<div className="pt-28 md:pt-32 pb-24">
+```
+
+---
+
+## Phase 2 — High: Visual Bugs Affecting Core Shopping Experience
+
+These bugs affect the product cards, cart, and search — the core e-commerce UX.
+
+---
+
+### BUG-04 · Product Card: Badges collide with Wishlist heart on narrow screens
+| | |
+|---|---|
+| **Severity** | 🟠 High |
+| **Type** | Overlap |
+| **File** | [`ProductCard.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/components/product/ProductCard.tsx#L81-L105) |
+| **Lines** | `:81-92` (badges) · `:94-105` (wishlist button) |
+
+**Root Cause:** Badges are `absolute top-4 left-4` and the heart is `absolute top-4 right-4`. On the 2-column mobile grid, cards are ~170px wide, and two badges stacked vertically plus wide tracking can push into the heart's touch area.
+
+**Fix:** Constrain badge max-width and ensure the heart always has clear space:
+```diff
+ // ProductCard.tsx:81
+-<div className="absolute top-4 left-4 flex flex-col gap-2">
++<div className="absolute top-3 left-3 flex flex-col gap-1.5 max-w-[calc(100%-3.5rem)]">
+```
+
+---
+
+### BUG-05 · Product Card: `truncate` on Terrain fails inside flex (no `min-w-0`)
+| | |
+|---|---|
+| **Severity** | 🟠 High |
+| **Type** | Flexbox / Overflow |
+| **File** | [`ProductCard.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/components/product/ProductCard.tsx#L120) |
+| **Lines** | `:120` |
+
+**Root Cause:** The parent `<div>` is `flex` but has no `min-w-0` or `overflow-hidden`. Per CSS spec, flex children default to `min-width: auto`, preventing text truncation — the card stretches instead.
+
+**Fix:**
+```diff
+ // ProductCard.tsx:120
+-<div className="flex items-center gap-1.5 md:gap-2 mb-4 text-[8px] md:text-[10px] text-muted-foreground font-semibold uppercase tracking-wider [word-spacing:0.1em]">
++<div className="flex items-center gap-1.5 md:gap-2 mb-4 text-[8px] md:text-[10px] text-muted-foreground font-semibold uppercase tracking-wider [word-spacing:0.1em] min-w-0 overflow-hidden">
+```
+
+---
+
+### BUG-06 · Cart Drawer: Long product names break item layout
+| | |
+|---|---|
+| **Severity** | 🟠 High |
+| **Type** | Overflow / Spacing |
+| **File** | [`CartDrawer.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/components/cart/CartDrawer.tsx#L68) |
+| **Lines** | `:68` |
+
+**Root Cause:** The product name `<h4>` at Line 68 has no text clamping. A long name wraps to 3-4 lines, pushing the quantity/price section out of alignment.
+
+**Fix:**
+```diff
+ // CartDrawer.tsx:68
+-<h4 className="text-sm font-bold uppercase tracking-tight italic mb-2">{item.name}</h4>
++<h4 className="text-sm font-bold uppercase tracking-tight italic mb-2 line-clamp-2">{item.name}</h4>
+```
+
+---
+
+### BUG-07 · Search Overlay: Padding causes input text to run off-screen on mobile
+| | |
+|---|---|
+| **Severity** | 🟠 High |
+| **Type** | Overflow / Spacing |
+| **File** | [`SearchOverlay.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/components/search/SearchOverlay.tsx#L57-L77) |
+| **Lines** | `:57` (overlay padding) · `:77` (input styling) |
+
+**Root Cause:** The overlay container uses `p-6 md:p-12` and the input itself uses `text-xl sm:text-2xl md:text-3xl` with `word-spacing:0.25em`. On a narrow mobile screen, the large font + word spacing pushes typed text past the viewport edge.
+
+**Fix:**
+```diff
+ // SearchOverlay.tsx:77
+-className="w-full bg-transparent border-none text-xl sm:text-2xl md:text-3xl font-black italic uppercase tracking-normal [word-spacing:0.25em] placeholder:text-white/15 focus:ring-0 pl-12 md:pl-16 pr-4"
++className="w-full bg-transparent border-none text-lg sm:text-2xl md:text-3xl font-black italic uppercase tracking-normal [word-spacing:0.15em] sm:[word-spacing:0.25em] placeholder:text-white/15 focus:ring-0 pl-12 md:pl-16 pr-4"
+```
+
+---
+
+### BUG-08 · Product Detail: Wishlist button loses square shape on mobile
+| | |
+|---|---|
+| **Severity** | 🟠 High |
+| **Type** | Responsive Layout |
+| **File** | [`ProductDetailPage.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/pages/ProductDetailPage.tsx#L171) |
+| **Lines** | `:171` |
+
+**Root Cause:** The wishlist button uses `h-14 sm:w-14` — it only gets a fixed width at `sm` (640px+). Below that, inside a `flex` row with `items-stretch`, it stretches to full width and becomes a wide rectangle instead of a square icon button.
+
+**Fix:**
+```diff
+ // ProductDetailPage.tsx:171
+-"h-14 sm:w-14 border rounded-sm skew-x-[-10deg] flex items-center justify-center transition-all",
++"h-14 w-14 border rounded-sm skew-x-[-10deg] flex items-center justify-center transition-all shrink-0",
+```
+
+---
+
+### BUG-09 · Product Detail: Quick Specs `truncate` fails (same flex issue as BUG-05)
+| | |
+|---|---|
+| **Severity** | 🟠 High |
+| **Type** | Flexbox / Overflow |
+| **File** | [`ProductDetailPage.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/pages/ProductDetailPage.tsx#L114) |
+| **Lines** | `:114` |
+
+**Root Cause:** The spec value column (Line 114) uses `flex flex-col` without `min-w-0`. The `truncate` on spec values at Line 116 will not activate if the value overflows the grid cell.
+
+**Fix:**
+```diff
+ // ProductDetailPage.tsx:114
+-<div key={spec.label} className="flex flex-col">
++<div key={spec.label} className="flex flex-col min-w-0">
+```
+
+---
+
+### BUG-10 · Product Detail: Breadcrumb `truncate` fails (same flex issue)
+| | |
+|---|---|
+| **Severity** | 🟠 High |
+| **Type** | Flexbox / Overflow |
+| **File** | [`ProductDetailPage.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/pages/ProductDetailPage.tsx#L52) |
+| **Lines** | `:52` |
+
+**Root Cause:** The breadcrumb container is `flex` with no `min-w-0`. The product name at Line 57 has `truncate max-w-[200px]`, but the flex parent prevents the truncation from ever activating.
+
+**Fix:**
+```diff
+ // ProductDetailPage.tsx:52
+-<div className="hidden md:flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground mb-8">
++<div className="hidden md:flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground mb-8 min-w-0">
+```
+
+---
+
+## Phase 3 — Medium: Responsiveness & Spacing Polish
+
+These bugs affect specific screen sizes or edge cases. Users will notice them, but they don't block core functionality.
+
+---
+
+### BUG-11 · Mobile Bottom Nav: Labels overlap on narrow screens (iPhone SE)
+| | |
+|---|---|
+| **Severity** | 🟡 Medium |
+| **Type** | Spacing / Text Overlap |
+| **File** | [`MobileBottomNav.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/components/layout/MobileBottomNav.tsx#L37-L59) |
+| **Lines** | `:37`, `:59` |
+
+**Root Cause:** Labels use `tracking-widest` (0.1em letter-spacing) at `text-[8px]`. On a 320px-wide screen split into 5 equal columns, words like "WISHLIST" and "MODELS" overflow their containers and overlap each other.
+
+**Fix:**
+```diff
+ // MobileBottomNav.tsx:37 and :59 (both label spans)
+-<span className="text-[8px] font-black uppercase tracking-widest italic">{item.label}</span>
++<span className="text-[8px] font-black uppercase tracking-wider italic">{item.label}</span>
+```
+> Change `tracking-widest` → `tracking-wider` to reduce letter-spacing.
+
+---
+
+### BUG-12 · Footer: Copyright text awkward wrapping on mobile
+| | |
+|---|---|
+| **Severity** | 🟡 Medium |
+| **Type** | Spacing / Typography |
+| **File** | [`Footer.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/components/layout/Footer.tsx#L77-L84) |
+| **Lines** | `:77-84` |
+
+**Root Cause:** The copyright text at Line 78 uses `tracking-[0.2em]` and is a very long string. On mobile, it wraps onto 3-4 lines with tight, uncomfortable line-height. The Policy/Terms links at Lines 82-83 also wrap awkwardly.
+
+**Fix:**
+```diff
+ // Footer.tsx:77
+-<div className="container mx-auto px-4 md:px-6 pt-8 border-t border-white/5 flex flex-col md:flex-row items-center justify-between gap-4">
++<div className="container mx-auto px-4 md:px-6 pt-8 border-t border-white/5 flex flex-col md:flex-row items-center justify-between gap-4 text-center md:text-left">
+
+ // Footer.tsx:78
+-<p className="text-muted-foreground text-[10px] uppercase tracking-[0.2em]">
++<p className="text-muted-foreground text-[10px] uppercase tracking-[0.15em] leading-relaxed">
+```
+
+---
+
+### BUG-13 · Wishlist Page: Terrain `truncate` fails (same flex issue as BUG-05)
+| | |
+|---|---|
+| **Severity** | 🟡 Medium |
+| **Type** | Flexbox / Overflow |
+| **File** | [`WishlistPage.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/pages/WishlistPage.tsx#L114) |
+| **Lines** | `:114` |
+
+**Root Cause:** Identical to BUG-05 — the terrain flex container lacks `min-w-0`.
+
+**Fix:**
+```diff
+ // WishlistPage.tsx:114
+-<div className="flex items-center gap-2 text-[9px] text-muted-foreground font-semibold uppercase tracking-wider mb-4 [word-spacing:0.1em]">
++<div className="flex items-center gap-2 text-[9px] text-muted-foreground font-semibold uppercase tracking-wider mb-4 [word-spacing:0.1em] min-w-0 overflow-hidden">
+```
+
+---
+
+### BUG-14 · Product Detail: Tab buttons not interactive (non-functional tabs)
+| | |
+|---|---|
+| **Severity** | 🟡 Medium |
+| **Type** | UX / Missing State |
+| **File** | [`ProductDetailPage.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/pages/ProductDetailPage.tsx#L205-L207) |
+| **Lines** | `:205-207` |
+
+**Root Cause:** The three tab buttons ("Product Overview", "Technical Details", "In the Box") are statically rendered. Only "Product Overview" has the active `border-accent` underline — there's no `useState` tab-switching logic. Clicking the other two tabs does nothing, confusing users.
+
+**Fix:** Add tab state management:
+```diff
+ // ProductDetailPage.tsx — add state at top of component (around Line 10)
++const [activeTab, setActiveTab] = useState('overview');
+
+ // ProductDetailPage.tsx:205-207 — replace static buttons with dynamic
+-<button className="... border-b-2 border-accent ...">Product Overview</button>
+-<button className="... border-b-2 border-transparent ...">Technical Details</button>
+-<button className="... border-b-2 border-transparent ...">In the Box</button>
++<button onClick={() => setActiveTab('overview')} className={cn("... pb-4 border-b-2", activeTab === 'overview' ? 'border-accent text-white' : 'border-transparent text-muted-foreground hover:text-white')}>Product Overview</button>
++<button onClick={() => setActiveTab('specs')} className={cn("... pb-4 border-b-2", activeTab === 'specs' ? 'border-accent text-white' : 'border-transparent text-muted-foreground hover:text-white')}>Technical Details</button>
++<button onClick={() => setActiveTab('inbox')} className={cn("... pb-4 border-b-2", activeTab === 'inbox' ? 'border-accent text-white' : 'border-transparent text-muted-foreground hover:text-white')}>In the Box</button>
+```
+Then conditionally render tab content below based on `activeTab`.
+
+---
+
+### BUG-15 · Hero: Image path uses `/src/assets/` — will break in production build
+| | |
+|---|---|
+| **Severity** | 🟡 Medium |
+| **Type** | Asset Path / Build Error |
+| **Files** | [`Hero.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/components/home/Hero.tsx#L14) · [`CategoryShowcase.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/components/home/CategoryShowcase.tsx#L10-L40) |
+| **Lines** | `Hero.tsx:14` · `CategoryShowcase.tsx:10,16,22,28,34,40` |
+
+**Root Cause:** Images reference `/src/assets/images/...` as string paths. Vite's dev server serves `/src/` directly, so this works in dev. But after `vite build`, the `/src/` directory doesn't exist in the output — **all hero and category images will 404 in production**.
+
+**Fix:** Import images as ES modules so Vite can hash and bundle them:
+```diff
+ // Hero.tsx — top of file
++import heroImage from '../../assets/images/hero_rc_car_cinematic_1790434394611.jpg';
+
+ // Hero.tsx:14
+-src="/src/assets/images/hero_rc_car_cinematic_1790434394611.jpg"
++src={heroImage}
+```
+Same pattern for all 6 images in `CategoryShowcase.tsx`.
+
+---
+
+### BUG-16 · Footer: Links use `<a href>` instead of `<Link to>` — causes full page reloads
+| | |
+|---|---|
+| **Severity** | 🟡 Medium |
+| **Type** | SPA Navigation |
+| **File** | [`Footer.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/components/layout/Footer.tsx#L9-L54) |
+| **Lines** | `:9`, `:37-41`, `:49-53` |
+
+**Root Cause:** All internal links in the footer (`/collections/crawlers`, `/contact`, `/about`, etc.) use standard `<a href="...">` tags instead of React Router's `<Link to="...">`. This causes a full browser reload on every click, destroying SPA state (cart contents in memory, scroll position, etc.).
+
+**Fix:** Replace all internal `<a href="...">` with `<Link to="...">`:
+```diff
+ // Footer.tsx — add import
++import { Link } from 'react-router-dom';
+
+ // Footer.tsx:9 (logo link)
+-<a href="/" className="flex items-center gap-2 mb-6">
++<Link to="/" className="flex items-center gap-2 mb-6">
+ ...
+-</a>
++</Link>
+
+ // Footer.tsx:37-41 (collection links) — repeat for each
+-<a href="/collections/all-rc-models" ...>All RC Models</a>
++<Link to="/collections/all-rc-models" ...>All RC Models</Link>
+```
+
+---
+
+### BUG-17 · Hero & Home CTA: Same `<a href>` vs `<Link>` issue
+| | |
+|---|---|
+| **Severity** | 🟡 Medium |
+| **Type** | SPA Navigation |
+| **Files** | [`Hero.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/components/home/Hero.tsx#L41-L46) · [`App.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/App.tsx#L51) |
+| **Lines** | `Hero.tsx:41,44` · `App.tsx:51` |
+
+**Root Cause:** The "Shop RC Models", "Explore Crawlers" CTA buttons in the hero, and the "Get Expert Advice" CTA in the home banner all use `<a href>` instead of `<Link to>`, causing unnecessary full page reloads.
+
+**Fix:** Replace with `<Link to="...">` in both files.
+
+---
+
+## Phase 4 — Low: Polish, SEO, and Edge Cases
+
+These are minor improvements that enhance quality but have minimal functional impact.
+
+---
+
+### BUG-18 · `index.html`: OG meta tags are generic "Google AI Studio" boilerplate
+| | |
+|---|---|
+| **Severity** | 🔵 Low |
+| **Type** | SEO / Meta |
+| **File** | [`index.html`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/index.html#L11-L14) |
+| **Lines** | `:11-14` |
+
+**Root Cause:** The Open Graph and Twitter card meta tags still say "My Google AI Studio App" and "An application built with Google AI Studio." — leftover boilerplate from project scaffolding.
+
+**Fix:**
+```diff
+ // index.html:11-14
+-<meta property="og:title" content="My Google AI Studio App" />
+-<meta property="og:description" content="An application built with Google AI Studio." />
++<meta property="og:title" content="RC MEGA | Premium RC Models & Hobby Store" />
++<meta property="og:description" content="Ultimate destination for premium RC hobbyists. High-speed bashers, technical crawlers, genuine spare parts, and expert pit crew support." />
+```
+
+---
+
+### BUG-19 · `BrandStrip.tsx`: Unused `motion` import
+| | |
+|---|---|
+| **Severity** | 🔵 Low |
+| **Type** | Dead Code |
+| **File** | [`BrandStrip.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/components/home/BrandStrip.tsx#L1) |
+| **Lines** | `:1` |
+
+**Root Cause:** `motion` is imported from `motion/react` but never used in the component. This adds unnecessary JS to the bundle.
+
+**Fix:**
+```diff
+ // BrandStrip.tsx:1
+-import { motion } from 'motion/react';
+```
+
+---
+
+### BUG-20 · `BrandStrip.tsx`: Import inconsistency (`motion/react` vs `framer-motion`)
+| | |
+|---|---|
+| **Severity** | 🔵 Low |
+| **Type** | Consistency / Potential Build Error |
+| **File** | [`BrandStrip.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/components/home/BrandStrip.tsx#L1) |
+| **Lines** | `:1` |
+
+**Root Cause:** Every other file imports from `framer-motion` (e.g., `Hero.tsx`, `CategoryShowcase.tsx`, `Header.tsx`, `ProductCard.tsx`). But `BrandStrip.tsx` imports from `motion/react`. While both packages coexist, this inconsistency can lead to duplicate bundle chunks and subtle version mismatches.
+
+**Fix:** After removing the unused import (BUG-19), this is resolved. If `motion` is ever needed here in the future, import from `framer-motion` for consistency.
+
+---
+
+### BUG-21 · `ProductDetailPage.tsx`: Uses `<a href>` for breadcrumbs & WhatsApp link mismatch
+| | |
+|---|---|
+| **Severity** | 🔵 Low |
+| **Type** | SPA Navigation |
+| **File** | [`ProductDetailPage.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/pages/ProductDetailPage.tsx#L53-L55) |
+| **Lines** | `:53`, `:55` |
+
+**Root Cause:** The breadcrumb links at Lines 53 and 55 use `<a href="/">` and `<a href="/collections/all-rc-models">` instead of `<Link>`.
+
+**Fix:**
+```diff
+-<a href="/" className="hover:text-white transition-colors">Home</a>
++<Link to="/" className="hover:text-white transition-colors">Home</Link>
+-<a href="/collections/all-rc-models" className="hover:text-white transition-colors">RC Models</a>
++<Link to="/collections/all-rc-models" className="hover:text-white transition-colors">RC Models</Link>
+```
+
+---
+
+### BUG-22 · `ContactPage.tsx`: Form submits client-side only — no error boundary
+| | |
+|---|---|
+| **Severity** | 🔵 Low |
+| **Type** | UX / Missing Feedback |
+| **File** | [`ContactPage.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/pages/ContactPage.tsx#L19-L27) |
+| **Lines** | `:19-27` |
+
+**Root Cause:** The form handler at Line 19 generates a fake ticket ID and flips `submitted` to true without any API call. While this is intentional for now (demo mode), there's no loading state or error handling, so if an API is later wired up, the UI has no way to show a spinner or failure message.
+
+**Fix (prep for future):**
+```diff
+ // ContactPage.tsx — add to state
++const [submitting, setSubmitting] = useState(false);
++const [submitError, setSubmitError] = useState('');
+
+ // ContactPage.tsx:305-312 — update submit button
+-<button type="submit" className="btn-primary w-full py-4 ...">
++<button type="submit" disabled={submitting} className="btn-primary w-full py-4 ... disabled:opacity-50">
+```
+
+---
+
+## Execution Summary
+
+| Phase | Bug IDs | Files Touched | Estimated Effort |
+|-------|---------|---------------|------------------|
+| **Phase 1 — Critical** | BUG-01, BUG-02, BUG-03 | 3 files | ~15 min |
+| **Phase 2 — High** | BUG-04 to BUG-10 | 4 files | ~30 min |
+| **Phase 3 — Medium** | BUG-11 to BUG-17 | 8 files | ~45 min |
+| **Phase 4 — Low** | BUG-18 to BUG-22 | 5 files | ~20 min |
+| **Total** | **22 bugs** | **18 unique files** | **~2 hours** |
+
+---
+
+## File Change Map (Quick Reference)
+
+| File | Bug IDs |
+|------|---------|
+| [`App.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/App.tsx) | BUG-01, BUG-17 |
+| [`index.html`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/index.html) | BUG-18 |
+| [`MobileBottomNav.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/components/layout/MobileBottomNav.tsx) | BUG-01, BUG-11 |
+| [`Footer.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/components/layout/Footer.tsx) | BUG-12, BUG-16 |
+| [`Header.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/components/layout/Header.tsx) | — (no changes) |
+| [`ProductCard.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/components/product/ProductCard.tsx) | BUG-04, BUG-05 |
+| [`CartDrawer.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/components/cart/CartDrawer.tsx) | BUG-02, BUG-06 |
+| [`SearchOverlay.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/components/search/SearchOverlay.tsx) | BUG-07 |
+| [`Hero.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/components/home/Hero.tsx) | BUG-15, BUG-17 |
+| [`CategoryShowcase.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/components/home/CategoryShowcase.tsx) | BUG-15 |
+| [`BrandStrip.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/components/home/BrandStrip.tsx) | BUG-19, BUG-20 |
+| [`CollectionPage.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/pages/CollectionPage.tsx) | BUG-02 |
+| [`ProductDetailPage.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/pages/ProductDetailPage.tsx) | BUG-03, BUG-08, BUG-09, BUG-10, BUG-14, BUG-21 |
+| [`WishlistPage.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/pages/WishlistPage.tsx) | BUG-13 |
+| [`ContactPage.tsx`](file:///c:/Users/agawa/OneDrive/Documents/ChatGPT/Fly%20Rc%20Project/torque-rc-store/src/pages/ContactPage.tsx) | BUG-22 |
+
+---
+
+> **⚡ Ready to execute.** Reply with "Proceed" or specify a Phase to begin implementation.

@@ -1,5 +1,4 @@
-import dotenv from 'dotenv';
-dotenv.config();
+import 'dotenv/config';
 
 import { createPool } from '../src/db/index.ts';
 import { drizzle } from 'drizzle-orm/node-postgres';
@@ -127,6 +126,11 @@ const PRODUCT_IMAGE_MAP: Record<string, { thumbnail: string; images: string[] }>
 };
 
 async function update() {
+  if (!process.argv.includes('--apply')) {
+    console.log('Dry run: no product images were changed. Re-run with --apply to overwrite mapped image fields.');
+    process.exit(0);
+  }
+
   const pool = createPool();
   const db = drizzle(pool, { schema });
 
@@ -144,10 +148,11 @@ async function update() {
   }
 
   console.log('All product images updated successfully!');
-  process.exit(0);
+  await pool.end();
 }
 
-update().catch((err) => {
+update().catch(async (err) => {
   console.error(err);
-  process.exit(1);
+  await global._postgresPool?.end();
+  process.exitCode = 1;
 });
