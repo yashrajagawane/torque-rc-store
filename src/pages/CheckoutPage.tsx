@@ -18,10 +18,41 @@ interface CheckoutAddress {
 interface CheckoutPayload { items: Array<{ productId: number; quantity: number }>; shippingAddress: CheckoutAddress }
 interface PendingCheckout { key: string; payload: CheckoutPayload }
 interface Preview { items: CartItem[]; subtotal: string; shipping: string; total: string; currency: string }
-interface OrderResult { order: { id: number; total: string; paymentStatus: string; fulfillmentStatus: string }; replayed: boolean }
+interface OrderResult { order: { id: number; total: string; paymentStatus: string; fulfillmentStatus: string }; replayed: boolean; reviewRequired?: boolean }
+interface RazorpayCallback { razorpay_order_id: string; razorpay_payment_id: string; razorpay_signature: string }
+interface RazorpayOptions {
+  key: string; amount: number; currency: string; name: string; description: string; order_id: string;
+  handler: (response: RazorpayCallback) => void;
+  modal: { ondismiss: () => void };
+  theme: { color: string };
+}
+
+declare global {
+  interface Window { Razorpay?: new (options: RazorpayOptions) => { open: () => void; on: (event: string, callback: (response: unknown) => void) => void } }
+}
 
 const blankAddress: CheckoutAddress = { fullName: '', phone: '', addressLine1: '', addressLine2: '', city: '', state: '', postalCode: '', country: 'India' };
 const pendingKeyPrefix = 'rc-mega-checkout-pending:';
+const paymentOrderKeyPrefix = 'rc-mega-payment-order:';
+
+function loadRazorpayScript() {
+  if (window.Razorpay) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    const existing = document.querySelector<HTMLScriptElement>('script[data-razorpay-checkout]');
+    if (existing) {
+      existing.addEventListener('load', () => resolve(), { once: true });
+      existing.addEventListener('error', () => reject(new Error('Razorpay Checkout could not be loaded.')), { once: true });
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = 'https://checkout.razorpay.com/v1/checkout.js';
+    script.async = true;
+    script.dataset.razorpayCheckout = 'true';
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error('Razorpay Checkout could not be loaded.'));
+    document.body.appendChild(script);
+  });
+}
 
 function parsePending(value: string | null): PendingCheckout | null {
   if (!value) return null;
@@ -46,6 +77,8 @@ export function CheckoutPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [orderResult, setOrderResult] = useState<OrderResult | null>(null);
+  const [startingPayment, setStartingPayment] = useState(false);
+  const [paymentMessage, setPaymentMessage] = useState('');
 
   const loadPreview = useCallback(async (active: () => boolean) => {
     if (!token) { setLoadingPreview(false); return; }
@@ -65,12 +98,22 @@ export function CheckoutPage() {
     setPreview(null);
     setError('');
     setOrderResult(null);
+    setPaymentMessage('');
     setAddress(blankAddress);
     setPending(null);
     setInvalidPending(false);
     setPendingLoaded(false);
     if (userId) {
       try {
+        const savedPayment = localStorage.getItem(`${paymentOrderKeyPrefix}${userId}`);
+        if (savedPayment) {
+          const parsed = JSON.parse(savedPayment) as OrderResult;
+          if (Number.isSafeInteger(parsed?.order?.id) && parsed.order.id > 0 && typeof parsed.order.total === 'string') {
+            // Browser storage is only a resume hint; the server remains the
+            // authority for the current payment status.
+            setOrderResult({ ...parsed, order: { ...parsed.order, paymentStatus: 'UNPAID' } });
+          }
+        }
         const raw = localStorage.getItem(`${pendingKeyPrefix}${userId}`);
         const saved = parsePending(raw);
         if (raw && !saved) setInvalidPending(true);
@@ -84,6 +127,69 @@ export function CheckoutPage() {
     void loadPreview(() => active);
     return () => { active = false; };
   }, [userId, loadPreview]);
+
+  const startPayment = async (orderId: number, orderTotal = orderResult?.order.total || '0.00') => {
+    if (!token || !userId) { setPaymentMessage('Your session expired. Sign in again to continue payment.'); return; }
+    setStartingPayment(true);
+    setPaymentMessage('');
+    try {
+      const response = await fetch(`/api/orders/${orderId}/razorpay-order`, {
+        method: 'POST', headers: { Authorization: `Bearer ${token}` },
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || 'Test Mode payment could not be started.');
+      await loadRazorpayScript();
+      if (!window.Razorpay) throw new Error('Razorpay Checkout did not initialize.');
+      const checkout = new window.Razorpay({
+        key: payload.keyId,
+        amount: payload.amount,
+        currency: payload.currency,
+        name: 'RC MEGA',
+        description: `Order #${orderId}`,
+        order_id: payload.razorpayOrderId,
+        theme: { color: '#ff5a1f' },
+        modal: { ondismiss: () => setPaymentMessage('Payment was not confirmed. Your order remains unpaid; you can retry the same payment order.') },
+        handler: (checkoutResult) => {
+          void (async () => {
+            try {
+              const verified = await fetch(`/api/orders/${orderId}/verify-payment`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify(checkoutResult),
+              });
+              const result = await verified.json().catch(() => ({}));
+              if (verified.status === 202 && result.reviewRequired) {
+                const reviewResult: OrderResult = { order: { id: orderId, total: orderTotal, paymentStatus: 'UNPAID', fulfillmentStatus: 'UNFULFILLED' }, replayed: false, reviewRequired: true };
+                setOrderResult(reviewResult);
+                localStorage.setItem(`${paymentOrderKeyPrefix}${userId}`, JSON.stringify(reviewResult));
+                setPaymentMessage(result.message || 'Payment needs manual review. Do not pay again.');
+                return;
+              }
+              if (!verified.ok || result.paymentStatus !== 'PAID') throw new Error(result.error || 'Server has not confirmed payment yet.');
+              setOrderResult((current) => current ? { ...current, order: { ...current.order, paymentStatus: 'PAID' } } : null);
+              localStorage.removeItem(`${paymentOrderKeyPrefix}${userId}`);
+              setPaymentMessage('Payment confirmed securely. Your order is awaiting fulfillment processing.');
+            } catch (cause) {
+              const recoveryResult: OrderResult = {
+                order: { id: orderId, total: orderTotal, paymentStatus: 'UNPAID', fulfillmentStatus: 'UNFULFILLED' },
+                replayed: false,
+                reviewRequired: true,
+              };
+              setOrderResult(recoveryResult);
+              try { localStorage.setItem(`${paymentOrderKeyPrefix}${userId}`, JSON.stringify(recoveryResult)); } catch { /* Keep the current view blocked even if browser persistence is unavailable. */ }
+              setPaymentMessage(cause instanceof Error
+                ? `${cause.message} Do not pay again until your order status is checked.`
+                : 'Payment confirmation is uncertain. Do not pay again until your order status is checked.');
+            }
+          })();
+        },
+      });
+      checkout.on('payment.failed', () => setPaymentMessage('Razorpay did not confirm payment. Your order remains unpaid; you may retry.'));
+      checkout.open();
+    } catch (cause) {
+      setPaymentMessage(cause instanceof Error ? cause.message : 'Payment could not be started.');
+    } finally { setStartingPayment(false); }
+  };
 
   const sendCheckout = async (operation: PendingCheckout) => {
     if (!token || !userId) { setError('Your session expired. Sign in again before retrying checkout.'); return; }
@@ -99,10 +205,14 @@ export function CheckoutPage() {
       if (!response.ok) throw new Error(payload.error || 'Order could not be created. Retry the saved request.');
       const result = payload as OrderResult;
       setOrderResult(result);
-      try { localStorage.removeItem(`${pendingKeyPrefix}${userId}`); } catch { /* The confirmed order is still displayed; a stale key safely replays the same order. */ }
+      try {
+        localStorage.setItem(`${paymentOrderKeyPrefix}${userId}`, JSON.stringify(result));
+        localStorage.removeItem(`${pendingKeyPrefix}${userId}`);
+      } catch { setPaymentMessage('Order was created, but browser storage could not save the payment retry reference. Find the order in your account and contact support before retrying.'); }
       setPending(null);
       useCartStore.getState().clearCart();
       setPreview({ items: [], subtotal: '0.00', shipping: '0.00', total: '0.00', currency: 'INR' });
+      await startPayment(result.order.id, result.order.total);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Network error. Your saved checkout request is available to retry.');
     } finally { setSaving(false); }
@@ -143,9 +253,11 @@ export function CheckoutPage() {
       <p className="text-accent font-mono text-xs font-bold uppercase tracking-[0.3em] mb-2">Secure Checkout</p>
       <h1 className="text-3xl md:text-4xl italic mb-8">DELIVERY DETAILS</h1>
       {orderResult ? <section className="glass-card border border-emerald-500/30 p-8" role="status">
-        <h2 className="text-xl font-bold uppercase italic text-emerald-300">Order #{orderResult.order.id} created</h2>
-        <p className="mt-3 text-sm text-muted-foreground">Payment is pending. No payment was taken or marked as paid.</p>
+        <h2 className="text-xl font-bold uppercase italic text-emerald-300">Order #{orderResult.order.id} {orderResult.order.paymentStatus === 'PAID' ? 'paid' : 'created'}</h2>
+        <p className="mt-3 text-sm text-muted-foreground">{orderResult.order.paymentStatus === 'PAID' ? 'Razorpay payment was confirmed by the server.' : 'Payment remains pending until Razorpay confirms a captured payment and inventory is committed.'}</p>
         <p className="mt-2 text-sm">Order total: {formatOrderCurrency(orderResult.order.total)} · {orderResult.order.paymentStatus}</p>
+        {paymentMessage && <p role="status" className="mt-4 border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-200">{paymentMessage}</p>}
+        {orderResult.order.paymentStatus !== 'PAID' && !orderResult.reviewRequired && <button type="button" disabled={startingPayment} onClick={() => void startPayment(orderResult.order.id)} className="btn-primary mt-5 px-6 py-3 disabled:opacity-50">{startingPayment ? 'PREPARING TEST PAYMENT…' : 'PAY WITH RAZORPAY TEST MODE'}</button>}
         <Link className="inline-block mt-5 text-accent hover:underline" to="/account">View your account orders →</Link>
       </section> : <div className="grid lg:grid-cols-[1.2fr_.8fr] gap-8">
         <section className="glass-card border border-white/5 p-5 md:p-7">

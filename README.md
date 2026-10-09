@@ -178,16 +178,39 @@ Product cards, detail/cart APIs, cart writes and checkout preview report stock
 after active reservations. Admin stock edits cannot lower physical stock below
 currently active reservations.
 
-Checkout creates `PENDING` / `UNPAID` orders only. There is no payment gateway,
-payment-confirmation endpoint, or way for the browser or owner dashboard to mark
-an order paid. Fulfillment may start only after a future trusted payment
-integration records `PAID`; until then, only cancellation is allowed. Future
-payment confirmation must lock the order/reservations and call the server-side
-reservation-consumption helper in the same transaction as verified payment
-state. That helper atomically decrements physical stock and marks active
-reservations CONSUMED; it never marks an order paid itself. Expired or released
-reservations cannot be consumed. These routes and mocked tests do not constitute
-production payment or PostgreSQL concurrency verification.
+Checkout creates `PENDING` / `UNPAID` orders and reserves stock for 20 minutes.
+Razorpay Test Mode payment orders can be created only for the authenticated
+customer's eligible internal order. The amount comes from the saved order total;
+the server stores the Razorpay order ID and reuses it on retries. Ambiguous API
+timeouts remain locked for manual reconciliation so a retry cannot create a
+second provider order blindly.
+
+Razorpay Checkout's browser callback is only a request to verify. The Express
+server checks the callback HMAC using the stored Razorpay order ID, fetches the
+payment from Razorpay and requires a captured payment with the exact amount and
+INR currency. Only then does one transaction consume the reservation and mark
+the order paid. The webhook endpoint is registered before JSON parsing, verifies
+the exact raw request body, and deduplicates provider event IDs. Failed and
+out-of-order events cannot downgrade a paid order. A captured payment whose
+reservation expired or no longer matches is stored in owner-visible payment
+review cases; it is not marked paid or fulfilled. Refunds are not automated:
+the owner must reconcile the payment in Razorpay and arrange any required refund
+manually. These mocked tests do not verify real Razorpay Test Mode, browser
+Checkout, PostgreSQL transaction rollback, or webhook delivery.
+
+Configure only Razorpay **Test Mode** credentials: `RAZORPAY_KEY_ID` must begin
+with `rzp_test_`, and `RAZORPAY_KEY_SECRET` and `RAZORPAY_WEBHOOK_SECRET` remain
+server-only. The public Key ID is returned to the browser for Checkout; neither
+secret is sent to the frontend or included in logs. In the Razorpay Test Mode
+dashboard, register the public staging HTTPS URL (or a secure webhook tunnel)
+ending in `/api/payments/razorpay/webhook`, configure the same webhook secret in
+the server environment, and subscribe to `payment.captured` and `payment.failed`.
+For local/staging testing, create Test Mode keys and a webhook secret in the
+dashboard, set the three variables in the server environment, start the app,
+create an order, and pay through Razorpay's test checkout instruments. Confirm
+the account order becomes paid only after the server reports verification.
+Never put credentials in `VITE_*` variables. Do not switch to live keys in this
+task or use live payments.
 
 Customers view their own orders in `/account`; the owner can view all order
 details and update allowed fulfillment transitions at `/admin/orders`. Both
@@ -200,8 +223,6 @@ that cannot reconstruct historical names as they were at original purchase.
 
 Set optional `SHIPPING_FLAT_RATE_INR` in the Express environment to a non-negative
 INR amount with up to two decimal places. Unset or `0.00` means free shipping.
-No other checkout-specific secret is required; payment credentials are not used
-in this task.
 
 Migration `0003_checkout-orders.sql` is additive and has not been applied. It
 preserves old order and item rows, adds UUID ownership/idempotency and subtotal,
@@ -223,6 +244,12 @@ database, first apply the project's complete reviewed baseline and migrations
 `0000` through `0003`, then `0004`; `0004` alone is not a database initializer.
 Review and test against a backup/staging database before applying anywhere.
 
+Migration `0005_razorpay-test-payments.sql` adds nullable Razorpay IDs and a
+creation-state field to orders, plus webhook-event deduplication and owner-visible
+payment-review tables. It is additive and does not change existing order/payment
+statuses or backfill gateway IDs. Review it only after reconciling the Drizzle
+baseline; do not apply it to production without a reviewed backup/staging run.
+
 ## Database environment variables
 
 | Variable | Required | Purpose |
@@ -239,6 +266,9 @@ Review and test against a backup/staging database before applying anywhere.
 | `SQL_ADMIN_PASSWORD` | Optional legacy migration setting | Migration password when using discrete `SQL_*` settings. Prefer `MIGRATION_DATABASE_URL` for a separate role. |
 | `PORT` | Optional | Express listening port; defaults to `3000`. |
 | `SHIPPING_FLAT_RATE_INR` | Optional | Express checkout shipping charge in INR; defaults to `0.00` (free shipping). |
+| `RAZORPAY_KEY_ID` | Required for Test Mode checkout | Test Mode public key ID; must use the `rzp_test_` prefix. Never use a live key in this task. |
+| `RAZORPAY_KEY_SECRET` | Required for Test Mode checkout | Server-only Test Mode API secret; never expose it to browser code. |
+| `RAZORPAY_WEBHOOK_SECRET` | Required for webhooks | Server-only secret configured on the matching Razorpay Test Mode webhook. |
 | `NODE_ENV` | Optional | Set to `production` to serve the built `dist/` frontend; otherwise the server uses Vite development middleware. |
 | `DISABLE_HMR` | Optional | Set to `true` to disable Vite HMR/file watching in environments where that is needed. |
 | `GEMINI_API_KEY`, `APP_URL` | Optional platform values | Retained for AI Studio deployment compatibility; not used by current storefront source code. |

@@ -73,12 +73,48 @@ export const orders = pgTable('orders', {
   status: text('status').default('PENDING'), // PENDING, PAID, SHIPPED, DELIVERED, CANCELLED
   paymentStatus: text('payment_status').default('UNPAID'),
   fulfillmentStatus: text('fulfillment_status').notNull().default('UNFULFILLED'),
+  razorpayOrderId: text('razorpay_order_id'),
+  razorpayPaymentId: text('razorpay_payment_id'),
+  razorpayOrderCreationStatus: text('razorpay_order_creation_status').notNull().default('NOT_STARTED'),
   shippingAddress: jsonb('shipping_address').notNull(),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),
 }, (table) => [
   uniqueIndex('orders_customer_idempotency_unique').on(table.customerAuthId, table.idempotencyKey),
+  uniqueIndex('orders_razorpay_order_id_unique').on(table.razorpayOrderId),
+  uniqueIndex('orders_razorpay_payment_id_unique').on(table.razorpayPaymentId),
   index('orders_customer_auth_id_idx').on(table.customerAuthId),
+  check('orders_razorpay_creation_status_valid', sql`${table.razorpayOrderCreationStatus} IN ('NOT_STARTED', 'CREATING', 'CREATED', 'FAILED')`),
+]);
+
+export const razorpayWebhookEvents = pgTable('razorpay_webhook_events', {
+  id: serial('id').primaryKey(),
+  eventId: text('event_id').notNull().unique(),
+  eventType: text('event_type').notNull(),
+  gatewayOrderId: text('gateway_order_id'),
+  gatewayPaymentId: text('gateway_payment_id'),
+  processingStatus: text('processing_status').notNull().default('RECEIVED'),
+  receivedAt: timestamp('received_at', { withTimezone: true }).notNull().defaultNow(),
+  processedAt: timestamp('processed_at', { withTimezone: true }),
+}, (table) => [
+  index('razorpay_webhook_events_payment_idx').on(table.gatewayPaymentId),
+  check('razorpay_webhook_events_status_valid', sql`${table.processingStatus} IN ('RECEIVED', 'PROCESSED', 'IGNORED', 'REVIEW_REQUIRED')`),
+]);
+
+export const paymentReviewCases = pgTable('payment_review_cases', {
+  id: serial('id').primaryKey(),
+  orderId: integer('order_id').references(() => orders.id, { onDelete: 'restrict' }),
+  razorpayPaymentId: text('razorpay_payment_id').notNull().unique(),
+  razorpayOrderId: text('razorpay_order_id').notNull(),
+  amountPaise: integer('amount_paise').notNull(),
+  currency: text('currency').notNull(),
+  reason: text('reason').notNull(),
+  status: text('status').notNull().default('OPEN'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index('payment_review_cases_order_idx').on(table.orderId, table.createdAt),
+  check('payment_review_cases_amount_positive', sql`${table.amountPaise} > 0`),
+  check('payment_review_cases_status_valid', sql`${table.status} IN ('OPEN', 'RESOLVED')`),
 ]);
 
 export const orderItems = pgTable('order_items', {

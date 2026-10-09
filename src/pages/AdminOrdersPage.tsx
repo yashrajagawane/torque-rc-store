@@ -19,6 +19,18 @@ interface ManagedOrder {
   createdAt: string | null;
   items: OrderItem[];
 }
+interface PaymentReviewCase {
+  id: number;
+  orderId: number | null;
+  customerEmail: string | null;
+  orderTotal: string | null;
+  paymentId: string;
+  razorpayOrderId: string;
+  amountPaise: number;
+  currency: string;
+  reason: string;
+  createdAt: string;
+}
 
 function nextStatuses(order: ManagedOrder) {
   if (order.fulfillmentStatus === 'CANCELLED' || order.fulfillmentStatus === 'DELIVERED') return [];
@@ -33,6 +45,7 @@ function nextStatuses(order: ManagedOrder) {
 export function AdminOrdersPage() {
   const { session } = useAuth();
   const [orders, setOrders] = useState<ManagedOrder[]>([]);
+  const [reviewCases, setReviewCases] = useState<PaymentReviewCase[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [error, setError] = useState('');
@@ -53,8 +66,11 @@ export function AdminOrdersPage() {
     setLoading(true);
     setError('');
     try {
-      const payload = await request('/api/admin/orders');
+      const [payload, reviewPayload] = await Promise.all([
+        request('/api/admin/orders'), request('/api/admin/payment-review-cases'),
+      ]);
       setOrders(Array.isArray(payload.orders) ? payload.orders as ManagedOrder[] : []);
+      setReviewCases(Array.isArray(reviewPayload.cases) ? reviewPayload.cases as PaymentReviewCase[] : []);
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Order management is unavailable.'); }
     finally { setLoading(false); }
   }, [request]);
@@ -82,6 +98,15 @@ export function AdminOrdersPage() {
       <div className="flex gap-5 mb-6 text-xs font-bold uppercase tracking-widest"><Link to="/admin" className="text-muted-foreground hover:text-white">Products</Link><span className="text-accent">Orders</span></div>
       {error && <p role="alert" className="mb-5 border border-red-500/30 bg-red-500/5 p-4 text-sm text-red-300">{error}</p>}
       {notice && <p role="status" className="mb-5 border border-emerald-500/30 bg-emerald-500/5 p-4 text-sm text-emerald-300">{notice}</p>}
+      {reviewCases.length > 0 && <section className="glass-card mb-6 border border-amber-500/30 p-5" aria-labelledby="payment-review-heading">
+        <h2 id="payment-review-heading" className="text-lg font-bold uppercase italic text-amber-200">Captured payments needing review</h2>
+        <p className="mt-2 text-xs text-amber-100">These payments were not marked paid and inventory was not consumed. Reconcile with Razorpay and handle any refund manually; automatic refunds are not configured.</p>
+        <div className="mt-4 space-y-3">{reviewCases.map((item) => <article key={item.id} className="border border-white/10 p-4 text-sm">
+          <p className="font-bold">{item.orderId ? `Order #${item.orderId}` : 'Unmatched Razorpay order'} · {item.paymentId}</p>
+          <p className="mt-1 text-xs text-muted-foreground">Razorpay order {item.razorpayOrderId} · {formatOrderCurrency(item.amountPaise / 100)} {item.currency} · {item.customerEmail || 'Customer not matched'}</p>
+          <p className="mt-2 text-amber-100">{item.reason}</p>
+        </article>)}</div>
+      </section>}
       {loading ? <p role="status" className="glass-card p-10 text-center text-muted-foreground">Loading orders…</p> : orders.length === 0 ? <p className="glass-card p-10 text-center text-muted-foreground">No orders have been placed.</p> : <div className="space-y-5">
         {orders.map((order) => <article key={order.id} className="glass-card border border-white/5 p-5 md:p-6">
           <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-5">

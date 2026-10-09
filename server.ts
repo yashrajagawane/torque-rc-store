@@ -9,6 +9,7 @@ import { AuthenticatedRequest, isOwnerEmail, requireAuth, requireOwner } from '.
 import { createAdminProductRouter } from './src/server/admin-product-routes.ts';
 import { createCartRouter } from './src/server/cart-routes.ts';
 import { createAdminOrderRouter, createOrderRouter } from './src/server/order-routes.ts';
+import { createAdminPaymentReviewRouter, createPaymentRouter, createRazorpayWebhookHandler } from './src/server/payment-routes.ts';
 import { availableAvailabilitySql, availableStockSql } from './src/server/inventory.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -17,6 +18,8 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const port = process.env.PORT || 3000;
 
+// Razorpay signs the exact request bytes; register this route before JSON parsing.
+app.post('/api/payments/razorpay/webhook', express.raw({ type: 'application/json', limit: '1mb' }), createRazorpayWebhookHandler(db));
 app.use(express.json());
 
 // API Routes
@@ -38,8 +41,10 @@ app.get('/api/owner/test', requireAuth, requireOwner, (_req, res) => {
 
 app.use('/api/admin', createAdminProductRouter(db));
 app.use('/api/admin/orders', createAdminOrderRouter(db));
+app.use('/api/admin/payment-review-cases', createAdminPaymentReviewRouter(db));
 app.use('/api/cart', createCartRouter(db));
 app.use('/api/orders', createOrderRouter(db));
+app.use('/api/orders', createPaymentRouter(db));
 
 app.get('/api/products', async (req, res) => {
   try {
@@ -178,11 +183,11 @@ if (process.env.NODE_ENV === 'production') {
   });
 }
 
-app.use((error: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+app.use((error: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (res.headersSent) return next(error);
   const type = typeof error === 'object' && error !== null && 'type' in error ? error.type : undefined;
   if (type === 'entity.too.large') {
-    res.status(413).json({ error: 'Image uploads must be 8 MiB or smaller.' });
+    res.status(413).json({ error: req.path === '/api/payments/razorpay/webhook' ? 'Webhook request exceeds the 1 MiB limit.' : 'Image uploads must be 8 MiB or smaller.' });
     return;
   }
   if (type === 'entity.parse.failed') {
