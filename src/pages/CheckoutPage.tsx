@@ -202,7 +202,22 @@ export function CheckoutPage() {
         body: JSON.stringify(operation.payload),
       });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.error || 'Order could not be created. Retry the saved request.');
+      if (!response.ok) {
+        const details = Array.isArray(payload.details)
+          ? payload.details
+            .map((item: { field?: string; message?: string }) => [item.field, item.message].filter(Boolean).join(': '))
+            .filter(Boolean)
+            .join(' ')
+          : '';
+        if (response.status === 400) {
+          // Schema validation happens before an order or reservation can be
+          // created, so this request is safe to edit and resubmit with a new
+          // idempotency key. Keep the saved key for network/unknown failures.
+          try { localStorage.removeItem(`${pendingKeyPrefix}${userId}`); } catch { /* Continue with the editable form. */ }
+          setPending(null);
+        }
+        throw new Error(`${payload.error || 'Order could not be created.'}${details ? ` ${details}` : ''}`);
+      }
       const result = payload as OrderResult;
       setOrderResult(result);
       try {
