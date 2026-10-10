@@ -4,6 +4,7 @@ import { isAbsolute } from 'node:path';
 const confirmation = 'I_CONFIRM_NEW_SUPABASE_STAGING_SCHEMA';
 const migrationConfirmation = 'I_CONFIRM_SUPABASE_STAGING_MIGRATION';
 const noProductionConfirmation = 'I_CONFIRM_NO_PRODUCTION_SUPABASE_PROJECT';
+export const stagingDefaultPrivilegeConfirmation = 'I_CONFIRM_STAGING_DEFAULT_PRIVILEGE_HARDENING';
 
 export type StagingDatabaseSettings = {
   host: string;
@@ -49,6 +50,8 @@ export type StagingCatalogState = {
   supabaseMigrationRecords: number;
   supabaseMigrationEntries?: string[];
   dataApiRoles: string[];
+  /** All non-owner table/sequence default ACL grants in global and public scopes, for audit visibility. */
+  defaultAclInventory?: Array<{ owner: string; schema: string; objectType: 'table' | 'sequence'; grantee: string; privilege: string }>;
   dataApiRoleAudit?: Array<{
     role: string; superuser: boolean; bypassRls: boolean; inheritsRuntimeOwner: boolean; memberOfRuntimeOwner: boolean;
     publicUsage: boolean; publicCreate: boolean; authUsage: boolean; authCreate: boolean;
@@ -108,7 +111,7 @@ const expectedEventTriggers: readonly ExpectedEventTrigger[] = [
   { name: 'pgrst_drop_watch', owner: 'supabase_admin', enabled: 'O', event: 'sql_drop', tags: null, handlerName: 'pgrst_drop_watch', ...expectedPlatformHandler, handlerSourceLength: 412, handlerSourceMd5: 'bc09cc3003d66f91844af4cb05e203b7' },
 ];
 
-function exactAutomaticRlsConfiguration(state: StagingCatalogState): boolean {
+function exactAutomaticRlsConfiguration(state: Pick<StagingCatalogState, 'supabaseAutomaticRlsFunctions' | 'eventTriggers'>): boolean {
   if (state.supabaseAutomaticRlsFunctions.length !== 1 || state.eventTriggers.length !== expectedEventTriggers.length) return false;
   const fn = state.supabaseAutomaticRlsFunctions[0]!;
   const config = fn.configuration ? [...fn.configuration].sort() : null;
@@ -234,7 +237,10 @@ export function supabaseAutomaticRlsDiagnostics(state: StagingCatalogState): Rec
 }
 
 /** Requires the exact Supabase-created automatic-RLS function and its enabled event trigger. */
-export function assertSupabaseAutomaticRlsConfiguration(state: StagingCatalogState, required = true): void {
+export function assertSupabaseAutomaticRlsConfiguration(
+  state: Pick<StagingCatalogState, 'supabaseAutomaticRlsFunctions' | 'eventTriggers'>,
+  required = true,
+): void {
   if (!required && state.supabaseAutomaticRlsFunctions.length === 0 && state.eventTriggers.length === 0) return;
   if (!exactAutomaticRlsConfiguration(state)) {
     throw new Error('Supabase automatic-RLS function or event-trigger metadata is unexpected; manual review is required.');
@@ -350,19 +356,27 @@ export function resolveSupabaseStagingSettings(
   env: Record<string, string | undefined>,
 ): StagingDatabaseSettings;
 export function resolveSupabaseStagingSettings(
-  mode: 'initialize' | 'migrate' | 'check' | 'probe',
+  mode: 'prepare-default-privileges',
+  args: string[],
+  env: Record<string, string | undefined>,
+): StagingDatabaseSettings;
+export function resolveSupabaseStagingSettings(
+  mode: 'initialize' | 'migrate' | 'check' | 'probe' | 'prepare-default-privileges',
   args: string[],
   env: Record<string, string | undefined>,
 ): StagingDatabaseSettings | StagingIdentityProbeSettings {
   const expectedArg = mode === 'initialize' ? '--confirm-staging-initialize'
     : mode === 'migrate' ? '--confirm-staging-migrate'
-      : mode === 'check' ? '--confirm-staging-preflight' : '--confirm-staging-identity-probe';
+      : mode === 'check' ? '--confirm-staging-preflight'
+        : mode === 'prepare-default-privileges' ? '--confirm-staging-default-privilege-hardening' : '--confirm-staging-identity-probe';
   const expectedConfirmation = mode === 'initialize' ? confirmation
     : mode === 'migrate' ? migrationConfirmation
-      : mode === 'check' ? 'I_CONFIRM_READ_ONLY_SUPABASE_STAGING_PREFLIGHT' : 'I_CONFIRM_READ_ONLY_SUPABASE_STAGING_IDENTITY_PROBE';
+      : mode === 'check' ? 'I_CONFIRM_READ_ONLY_SUPABASE_STAGING_PREFLIGHT'
+        : mode === 'prepare-default-privileges' ? stagingDefaultPrivilegeConfirmation : 'I_CONFIRM_READ_ONLY_SUPABASE_STAGING_IDENTITY_PROBE';
   const confirmationEnv = mode === 'initialize' ? 'SUPABASE_STAGING_INITIALIZATION_CONFIRMATION'
     : mode === 'migrate' ? 'SUPABASE_STAGING_MIGRATION_CONFIRMATION'
-      : mode === 'check' ? 'SUPABASE_STAGING_PREFLIGHT_CONFIRMATION' : 'SUPABASE_STAGING_PROBE_CONFIRMATION';
+      : mode === 'check' ? 'SUPABASE_STAGING_PREFLIGHT_CONFIRMATION'
+        : mode === 'prepare-default-privileges' ? 'SUPABASE_STAGING_DEFAULT_PRIVILEGE_CONFIRMATION' : 'SUPABASE_STAGING_PROBE_CONFIRMATION';
   if (args.length !== 1 || args[0] !== expectedArg) throw new Error(`Pass ${expectedArg} exactly once and no other arguments.`);
   if (env.SUPABASE_STAGING_ENABLED !== 'true') throw new Error('SUPABASE_STAGING_ENABLED must equal true.');
   if (env[confirmationEnv] !== expectedConfirmation) throw new Error(`Explicit ${mode} confirmation is required.`);
@@ -394,8 +408,8 @@ export function resolveSupabaseStagingSettings(
   if (!validProjectRef(env.SUPABASE_STAGING_PROJECT_REF)) {
     throw new Error('A valid staging project reference is required.');
   }
-  if (mode === 'probe' && !noProductionMode) {
-    throw new Error('The identity probe requires explicit no-production-project mode.');
+  if ((mode === 'probe' || mode === 'prepare-default-privileges') && !noProductionMode) {
+    throw new Error('This command requires explicit no-production-project mode.');
   }
   if (env.SUPABASE_STAGING_SCHEMA !== 'public') throw new Error('SUPABASE_STAGING_SCHEMA must equal public.');
 
@@ -518,6 +532,58 @@ export function assertStagingDataApiPrivileges(state: Pick<StagingCatalogState, 
       || role.schemaDefaultTablePrivileges.length > 0 || role.schemaDefaultSequencePrivileges.length > 0)) {
     throw new Error('Data API role privileges are not safely isolated from the application owner and business tables.');
   }
+}
+
+const platformDefaultPrivileges = [
+  ...['anon', 'authenticated'].flatMap((grantee) => [
+    ...['DELETE', 'INSERT', 'MAINTAIN', 'REFERENCES', 'SELECT', 'TRIGGER', 'TRUNCATE', 'UPDATE']
+      .map((privilege) => ({ owner: 'supabase_admin', schema: 'public', objectType: 'table' as const, grantee, privilege })),
+    ...['SELECT', 'UPDATE', 'USAGE']
+      .map((privilege) => ({ owner: 'supabase_admin', schema: 'public', objectType: 'sequence' as const, grantee, privilege })),
+  ]),
+];
+
+/**
+ * Audits all relevant non-owner default ACL entries. Only the configured application
+ * owner may have the explicitly remediable anon/authenticated public-schema grants;
+ * the separately observed Supabase-managed defaults must match their exact snapshot.
+ */
+export function assertStagingDefaultAclInventory(
+  inventory: StagingCatalogState['defaultAclInventory'],
+  applicationOwner: string,
+  allowApplicationOwnerApiDefaults = false,
+): void {
+  if (!inventory || !applicationOwner.trim()) throw new Error('Default ACL inventory or migration owner is unavailable.');
+  const canonical = (row: NonNullable<StagingCatalogState['defaultAclInventory']>[number]) =>
+    `${row.owner}\u0000${row.schema}\u0000${row.objectType}\u0000${row.grantee}\u0000${row.privilege}`;
+  const actualKeys = inventory.map(canonical).sort();
+  if (new Set(actualKeys).size !== actualKeys.length) throw new Error('Default ACL inventory contains duplicate entries.');
+
+  const applicationRows = inventory.filter((row) => row.owner === applicationOwner);
+  const validApplicationPrivileges = new Set([
+    'DELETE', 'INSERT', 'MAINTAIN', 'REFERENCES', 'SELECT', 'TRIGGER', 'TRUNCATE', 'UPDATE',
+    'USAGE',
+  ]);
+  if (applicationRows.some((row) => row.schema !== 'public'
+    || !['anon', 'authenticated'].includes(row.grantee)
+    || !['table', 'sequence'].includes(row.objectType)
+    || (row.objectType === 'table' && !validApplicationPrivileges.has(row.privilege))
+    || (row.objectType === 'sequence' && !['SELECT', 'UPDATE', 'USAGE'].includes(row.privilege)))) {
+    throw new Error('Application-owner default ACL state is unexpected; manual review is required.');
+  }
+  if (!allowApplicationOwnerApiDefaults && applicationRows.length) {
+    throw new Error('Application-owner public defaults still grant privileges to Data API roles.');
+  }
+
+  const platformRows = inventory.filter((row) => row.owner === 'supabase_admin');
+  const platformKeys = platformRows.map(canonical).sort();
+  const expectedPlatformKeys = platformDefaultPrivileges.map(canonical).sort();
+  if (JSON.stringify(platformKeys) !== JSON.stringify(expectedPlatformKeys)) {
+    throw new Error('Supabase-managed default ACL inventory differs from the explicitly observed snapshot.');
+  }
+
+  const unknownOwners = inventory.filter((row) => row.owner !== applicationOwner && row.owner !== 'supabase_admin');
+  if (unknownOwners.length) throw new Error('Unexpected default ACL owner requires manual review.');
 }
 
 export function assertStagingInitializationState(state: StagingCatalogState, applicationObjectNames: string[] = [], automaticRlsRequired = true): void {

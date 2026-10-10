@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
 import { describe, it } from 'node:test';
+import type { PoolClient } from 'pg';
 import {
   assertStagingIdentity,
   assertStagingDataApiRoles,
   assertStagingDataApiPrivileges,
+  assertStagingDefaultAclInventory,
   assertStagingInitializationState,
   assertStagingMigrationHistory,
   assertStagingRequiredSchemas,
@@ -21,6 +23,7 @@ import {
   loadStagingRunnerDependencies,
   runSupabaseStagingPreflight,
   runSupabaseStagingCommand,
+  runSupabaseStagingDefaultPrivilegePreparation,
   beginVerifiedReadOnlyTransaction,
   openVerifiedReadOnlySession,
   StagingReadOnlyTransactionError,
@@ -55,6 +58,22 @@ const approvedPlatformTriggers = [
   { name: 'pgrst_ddl_watch', owner: 'supabase_admin', enabled: 'O', event: 'ddl_command_end', tags: null, handlerSchema: 'extensions', handlerName: 'pgrst_ddl_watch', ...platformHandler, handlerSourceLength: 729, handlerSourceMd5: '7f27b8118fea5c88b0164331292859e3', handlerObjectId: '90005', triggerHandlerObjectId: '90005' },
   { name: 'pgrst_drop_watch', owner: 'supabase_admin', enabled: 'O', event: 'sql_drop', tags: null, handlerSchema: 'extensions', handlerName: 'pgrst_drop_watch', ...platformHandler, handlerSourceLength: 412, handlerSourceMd5: 'bc09cc3003d66f91844af4cb05e203b7', handlerObjectId: '90006', triggerHandlerObjectId: '90006' },
 ];
+function supabaseAdminDefaults() {
+  return ['anon', 'authenticated'].flatMap((grantee) => [
+    ...['DELETE', 'INSERT', 'MAINTAIN', 'REFERENCES', 'SELECT', 'TRIGGER', 'TRUNCATE', 'UPDATE']
+      .map((privilege) => ({ owner: 'supabase_admin', schema: 'public', objectType: 'table' as const, grantee, privilege })),
+    ...['SELECT', 'UPDATE', 'USAGE']
+      .map((privilege) => ({ owner: 'supabase_admin', schema: 'public', objectType: 'sequence' as const, grantee, privilege })),
+  ]);
+}
+function applicationOwnerDefaults(owner = 'postgres') {
+  return ['anon', 'authenticated'].flatMap((grantee) => [
+    ...['DELETE', 'INSERT', 'MAINTAIN', 'REFERENCES', 'SELECT', 'TRIGGER', 'TRUNCATE', 'UPDATE']
+      .map((privilege) => ({ owner, schema: 'public', objectType: 'table' as const, grantee, privilege })),
+    ...['SELECT', 'UPDATE', 'USAGE']
+      .map((privilege) => ({ owner, schema: 'public', objectType: 'sequence' as const, grantee, privilege })),
+  ]);
+}
 const baseEnv: Record<string, string | undefined> = {
   SUPABASE_STAGING_ENABLED: 'true',
   SUPABASE_STAGING_PROJECT_REF: stagingRef,
@@ -78,6 +97,7 @@ const noProductionEnv: Record<string, string | undefined> = {
   SUPABASE_PRODUCTION_PROJECT_REF: '',
   SUPABASE_NO_PRODUCTION_PROJECT: 'true',
   SUPABASE_NO_PRODUCTION_PROJECT_CONFIRMATION: 'I_CONFIRM_NO_PRODUCTION_SUPABASE_PROJECT',
+  SUPABASE_STAGING_DEFAULT_PRIVILEGE_CONFIRMATION: 'I_CONFIRM_STAGING_DEFAULT_PRIVILEGE_HARDENING',
 };
 
 function state(deps: StagingRunnerDependencies, contact = false, securityApplied = true): StagingCatalogState {
@@ -102,6 +122,7 @@ function state(deps: StagingRunnerDependencies, contact = false, securityApplied
     supabaseMigrationRecords: 0,
     dataApiRoles: ['anon', 'authenticated'],
     dataApiRoleAudit: ['anon', 'authenticated'].map((role) => ({ role, superuser: false, bypassRls: false, inheritsRuntimeOwner: false, memberOfRuntimeOwner: false, publicUsage: true, publicCreate: false, authUsage: false, authCreate: false, storageUsage: false, storageCreate: false, drizzleUsage: false, drizzleCreate: false, applicationTablePrivileges: [], applicationColumnPrivileges: [], applicationSequencePrivileges: [], directApplicationTableAcl: [], directApplicationColumnAcl: [], directApplicationSequenceAcl: [], globalDefaultTablePrivileges: [], globalDefaultSequencePrivileges: [], schemaDefaultTablePrivileges: [], schemaDefaultSequencePrivileges: [] })),
+    defaultAclInventory: supabaseAdminDefaults(),
     applicationTables: tables,
     applicationColumns: Object.fromEntries(Object.entries(columns).map(([table, values]) => [table, values.map((column) => ({
       ...column,
@@ -128,6 +149,57 @@ function emptyPreflightState(deps: StagingRunnerDependencies): StagingCatalogSta
     applicationColumnDefaults: {}, applicationRlsTables: [], applicationPolicies: [],
     dataApiRoleAudit: ['anon', 'authenticated'].map((role) => ({ role, superuser: false, bypassRls: false, inheritsRuntimeOwner: false, memberOfRuntimeOwner: false, publicUsage: true, publicCreate: false, authUsage: false, authCreate: false, storageUsage: false, storageCreate: false, drizzleUsage: false, drizzleCreate: false, applicationTablePrivileges: [], applicationColumnPrivileges: [], applicationSequencePrivileges: [], directApplicationTableAcl: [], directApplicationColumnAcl: [], directApplicationSequenceAcl: [], globalDefaultTablePrivileges: [], globalDefaultSequencePrivileges: [], schemaDefaultTablePrivileges: [], schemaDefaultSequencePrivileges: [] })),
   };
+}
+
+function preparationHarness(options: { afterAcl?: ReturnType<typeof applicationOwnerDefaults>; applicationTables?: string[]; publicObjects?: Array<{ name: string; kind: string; extensionOwned: boolean }>; existingHistory?: boolean } = {}) {
+  const calls: string[] = [];
+  let aclReads = 0;
+  let closeCount = 0;
+  const client = {
+    async query<Row = unknown>(sql: string): Promise<{ rows: Row[] }> {
+      calls.push(sql.trim());
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK' || sql.startsWith('ALTER DEFAULT PRIVILEGES')) return { rows: [] as Row[] };
+      if (sql.includes('current_database() AS database')) return { rows: [{
+        database: 'postgres', loginUser: 'postgres', user: 'postgres', currentSchema: 'public', searchPath: 'public',
+        serverPort: 5432, transactionReadOnly: false,
+      }] as Row[] };
+      if (sql.includes('to_regclass(\'drizzle.__drizzle_migrations\')')) return { rows: [{
+        public: true, auth: true, storage: true, drizzle: options.existingHistory ?? false, supabaseMigrations: false,
+        drizzleHistory: options.existingHistory ?? false, supabaseHistory: false, applicationTables: options.applicationTables ?? [],
+      }] as Row[] };
+      if (sql.includes('pg_opfamily')) return { rows: (options.publicObjects ?? [{ name: 'rls_auto_enable', kind: 'routine', extensionOwned: false }]) as Row[] };
+      if (sql.includes('FROM pg_proc p JOIN pg_namespace')) return { rows: [approvedAutoRlsFunction] as Row[] };
+      if (sql.includes('FROM pg_event_trigger e JOIN pg_proc')) return { rows: [approvedAutoRlsTrigger, ...approvedPlatformTriggers] as Row[] };
+      if (sql.includes("FROM pg_roles r WHERE r.rolname IN ('anon','authenticated')")) return { rows: ['anon', 'authenticated'].map((role) => ({
+        role, superuser: false, bypassRls: false, inheritsOwner: false, memberOfOwner: false,
+        publicCreate: false, authCreate: false, storageCreate: false,
+      })) as Row[] };
+      if (sql.includes('FROM pg_default_acl d CROSS JOIN LATERAL aclexplode(d.defaclacl)')) {
+        aclReads += 1;
+        const rows = aclReads === 1
+          ? [...applicationOwnerDefaults(), ...supabaseAdminDefaults()]
+          : [...(options.afterAcl ?? []), ...supabaseAdminDefaults()];
+        return { rows: rows as Row[] };
+      }
+      throw new Error('Unexpected SQL in injected preparation test.');
+    },
+    release() { calls.push('RELEASE'); },
+  } as unknown as PoolClient;
+  const env = {
+    ...noProductionEnv,
+    SUPABASE_STAGING_DEFAULT_PRIVILEGE_CONFIRMATION: 'I_CONFIRM_STAGING_DEFAULT_PRIVILEGE_HARDENING',
+  };
+  const depsForRun = {
+    open: async (settings: StagingDatabaseSettings) => {
+      assert.equal(settings.runtimeUser, 'postgres');
+      assert.equal(settings.effectiveUser, 'postgres');
+      assert.equal(settings.schema, 'public');
+      assert.equal(settings.fingerprint, `db.${stagingRef}.supabase.co:5432/postgres/postgres`);
+      return { client, close: async () => { closeCount += 1; } };
+    },
+    applicationTableNames: ['products', 'orders'],
+  };
+  return { calls, env, depsForRun, get aclReads() { return aclReads; }, get closeCount() { return closeCount; } };
 }
 
 describe('Supabase staging initialization guard', () => {
@@ -819,5 +891,118 @@ describe('Supabase staging initialization guard', () => {
     assert.equal(opened, false);
     assert.ok(messages.some((message) => message.includes('CONFIGURATION_INVALID')));
     assert.ok(messages.every((message) => !/secret-password|postgresql:\/\//i.test(message)));
+  });
+
+  it('preparation removes only application-owner public anon/auth defaults in one transaction and verifies before commit', async () => {
+    const harness = preparationHarness();
+    const messages: string[] = [];
+    const code = await runSupabaseStagingDefaultPrivilegePreparation(
+      ['--confirm-staging-default-privilege-hardening'], harness.env, harness.depsForRun, (message) => messages.push(message),
+    );
+    assert.equal(code, 0);
+    assert.equal(harness.aclReads, 2);
+    assert.equal(harness.closeCount, 1);
+    assert.equal(harness.calls[0], 'BEGIN');
+    const commitIndex = harness.calls.indexOf('COMMIT');
+    const aclSql = harness.calls.filter((call) => call.includes('FROM pg_default_acl d CROSS JOIN LATERAL aclexplode(d.defaclacl)'));
+    assert.equal(aclSql.length, 2);
+    assert.ok(harness.calls.indexOf(aclSql[1]!) < commitIndex);
+    const alters = harness.calls.filter((call) => call.startsWith('ALTER DEFAULT PRIVILEGES'));
+    assert.equal(alters.length, 4);
+    assert.ok(alters.every((sql) => sql.includes('FOR ROLE CURRENT_USER IN SCHEMA public') && !sql.includes('supabase_admin')));
+    assert.deepEqual(alters, [
+      'ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA public REVOKE ALL ON TABLES FROM anon',
+      'ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA public REVOKE ALL ON TABLES FROM authenticated',
+      'ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA public REVOKE ALL ON SEQUENCES FROM anon',
+      'ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA public REVOKE ALL ON SEQUENCES FROM authenticated',
+    ]);
+    assert.ok(harness.calls.includes('ROLLBACK') === false);
+    assert.ok(messages.some((message) => message.includes('relevant_grants_before=22') && message.includes('relevant_grants_after=0')));
+    assert.ok(messages.every((message) => !/secret-password|postgresql:\/\//i.test(message)));
+  });
+
+  it('requires both explicit preparation and no-production confirmations before connecting', async () => {
+    for (const invalid of [
+      { ...noProductionEnv, SUPABASE_STAGING_DEFAULT_PRIVILEGE_CONFIRMATION: undefined },
+      { ...noProductionEnv, SUPABASE_NO_PRODUCTION_PROJECT_CONFIRMATION: undefined },
+      { ...noProductionEnv, SUPABASE_STAGING_TARGET_FINGERPRINT: 'wrong' },
+      { ...noProductionEnv, SUPABASE_PRODUCTION_PROJECT_REF: productionRef },
+      { ...noProductionEnv, DATABASE_URL: noProductionEnv.SUPABASE_STAGING_DATABASE_URL },
+      { ...noProductionEnv, SUPABASE_STAGING_DATABASE_EFFECTIVE_USER: 'supabase_admin', SUPABASE_STAGING_RUNTIME_DATABASE_USER: 'supabase_admin' },
+    ]) {
+      let opened = false;
+      const code = await runSupabaseStagingDefaultPrivilegePreparation(
+        ['--confirm-staging-default-privilege-hardening'], invalid,
+        { ...preparationHarness().depsForRun, open: async () => { opened = true; throw new Error('must not connect'); } },
+        () => undefined,
+      );
+      assert.equal(code, 2);
+      assert.equal(opened, false);
+    }
+  });
+
+  it('fails closed before privilege changes when application tables, history, or unexpected objects exist', async () => {
+    for (const options of [
+      { applicationTables: ['products'] },
+      { existingHistory: true },
+      { publicObjects: [{ name: 'unexpected', kind: 'relation', extensionOwned: false }] },
+    ]) {
+      const harness = preparationHarness(options);
+      const code = await runSupabaseStagingDefaultPrivilegePreparation(
+        ['--confirm-staging-default-privilege-hardening'], harness.env, harness.depsForRun, () => undefined,
+      );
+      assert.equal(code, 1);
+      assert.equal(harness.calls.some((call) => call.startsWith('ALTER DEFAULT PRIVILEGES')), false);
+      assert.ok(harness.calls.includes('ROLLBACK'));
+      assert.equal(harness.closeCount, 1);
+    }
+  });
+
+  it('allows only known platform defaults and the narrowly scoped application-owner defaults during preparation', () => {
+    assert.doesNotThrow(() => assertStagingDefaultAclInventory(supabaseAdminDefaults(), 'postgres'));
+    assert.doesNotThrow(() => assertStagingDefaultAclInventory([...supabaseAdminDefaults(), ...applicationOwnerDefaults()], 'postgres', true));
+    assert.throws(() => assertStagingDefaultAclInventory([...supabaseAdminDefaults(), ...applicationOwnerDefaults()], 'postgres'));
+    assert.throws(() => assertStagingDefaultAclInventory([...supabaseAdminDefaults(), ...applicationOwnerDefaults('other_owner')], 'postgres', true));
+    assert.throws(() => assertStagingDefaultAclInventory([...supabaseAdminDefaults(), { ...applicationOwnerDefaults()[0]!, schema: '<global>' }], 'postgres', true));
+    assert.throws(() => assertStagingDefaultAclInventory([...supabaseAdminDefaults(), { ...applicationOwnerDefaults()[0]!, objectType: 'unknown' as 'table' }], 'postgres', true));
+    assert.throws(() => assertStagingDefaultAclInventory([...supabaseAdminDefaults(), applicationOwnerDefaults()[0]!, applicationOwnerDefaults()[0]!], 'postgres', true));
+  });
+
+  it('rolls back when postconditions retain an application-owner default and preserves platform defaults', async () => {
+    const harness = preparationHarness({ afterAcl: applicationOwnerDefaults().slice(0, 1) });
+    const messages: string[] = [];
+    const code = await runSupabaseStagingDefaultPrivilegePreparation(
+      ['--confirm-staging-default-privilege-hardening'], harness.env, harness.depsForRun, (message) => messages.push(message),
+    );
+    assert.equal(code, 1);
+    assert.ok(harness.calls.includes('ROLLBACK'));
+    assert.equal(harness.calls.includes('COMMIT'), false);
+    assert.equal(harness.closeCount, 1);
+    assert.ok(messages.every((message) => !/secret-password|postgresql:\/\//i.test(message)));
+  });
+
+  it('returns failure on connection cleanup errors without exposing raw details', async () => {
+    const harness = preparationHarness();
+    const messages: string[] = [];
+    const code = await runSupabaseStagingDefaultPrivilegePreparation(
+      ['--confirm-staging-default-privilege-hardening'], harness.env,
+      { ...harness.depsForRun, open: async (settings) => {
+        const opened = await harness.depsForRun.open(settings);
+        return { client: opened.client, close: async () => { throw new Error('postgresql://secret-password'); } };
+      } },
+      (message) => messages.push(message),
+    );
+    assert.equal(code, 1);
+    assert.ok(messages.some((message) => message.includes('CONNECTION_CLOSE_FAILED')));
+    assert.ok(messages.every((message) => !/secret-password|postgresql:\/\//i.test(message)));
+  });
+
+  it('keeps the read-only preflight ineligible while application-owner defaults remain unsafe', async () => {
+    const deps = await loadStagingRunnerDependencies(async () => { throw new Error('unused'); });
+    const current = { ...emptyPreflightState(deps), defaultAclInventory: [...applicationOwnerDefaults(), ...supabaseAdminDefaults()] };
+    const code = await runSupabaseStagingPreflight(['--confirm-staging-preflight'], noProductionEnv, {
+      ...deps, open: async () => ({ inspect: async () => current, close: async () => undefined }),
+    }, () => undefined);
+    assert.equal(code, 1);
   });
 });

@@ -642,6 +642,7 @@ Required environment names:
 | `SUPABASE_STAGING_MIGRATION_CONFIRMATION` | Must equal `I_CONFIRM_SUPABASE_STAGING_MIGRATION` for forward migrations. |
 | `SUPABASE_STAGING_PREFLIGHT_CONFIRMATION` | Must equal `I_CONFIRM_READ_ONLY_SUPABASE_STAGING_PREFLIGHT` for the read-only catalog check. |
 | `SUPABASE_STAGING_PROBE_CONFIRMATION` | Must equal `I_CONFIRM_READ_ONLY_SUPABASE_STAGING_IDENTITY_PROBE` for the read-only identity probe. |
+| `SUPABASE_STAGING_DEFAULT_PRIVILEGE_CONFIRMATION` | Must equal `I_CONFIRM_STAGING_DEFAULT_PRIVILEGE_HARDENING` for the one-time, owner-scoped default-privilege preparation command. |
 
 Do not set generic `DATABASE_URL`, `MIGRATION_DATABASE_URL`, `FRESH_DATABASE_URL`, or discrete `SQL_*` settings to the same target when invoking these commands. The staging scripts use only `SUPABASE_STAGING_DATABASE_URL` and fail on configured target collisions or uncomparable targets. Each command validates target identity again. The PostgreSQL server's internal port is not compared to the host/pooler URL port. The connection explicitly starts with `search_path=public` and verifies `current_schema()` and the effective path before schema operations.
 
@@ -667,11 +668,25 @@ bun run db:probe:supabase-staging -- --confirm-staging-identity-probe
 
 It requires the explicit staging URL, expected host/port/database/login/fingerprint, `SUPABASE_STAGING_ENABLED=true`, no-Production-project mode and confirmation, plus `SUPABASE_STAGING_PROBE_CONFIRMATION=I_CONFIRM_READ_ONLY_SUPABASE_STAGING_IDENTITY_PROBE`. It does not require `SUPABASE_STAGING_DATABASE_EFFECTIVE_USER` or `SUPABASE_STAGING_RUNTIME_DATABASE_USER`; discovering `current_user` is its purpose. The probe uses a read-only connection and reports the database, `session_user`, `current_user`, schema, search path, internal server port, and whether the effective role is superuser or bypasses RLS. It does not inspect application records, apply schema changes, or invoke a migrator. Failures use sanitized categories such as `TLS_FAILURE` or `IDENTITY_QUERY_FAILED`; only validated SQLSTATE or allowlisted system error codes may be shown. Raw messages and connection details are withheld, so a category narrows the failure stage but does not by itself prove the root cause. Review the reported role and then configure the effective/runtime role expectations for catalog preflight. Do not infer that the observed role is appropriate for application runtime merely because the probe succeeds.
 
+Before baseline initialization, run the separately guarded default-privilege preparation only if the read-only preflight identifies unsafe defaults for the explicitly configured application migration/runtime owner:
+
+```sh
+bun run db:prepare:supabase-staging-default-privileges -- --confirm-staging-default-privilege-hardening
+```
+
+This command requires the same explicit staging target, verified project reference, target fingerprint, official-CA TLS, identity and collision checks, plus `SUPABASE_STAGING_ENABLED=true`, explicit no-Production mode and its confirmation, and the command-specific flag and `SUPABASE_STAGING_DEFAULT_PRIVILEGE_CONFIRMATION=I_CONFIRM_STAGING_DEFAULT_PRIVILEGE_HARDENING`. The connected `current_database()`, `session_user`, `current_user`, schema, and search path are checked again. The configured runtime/migration owner must equal the observed effective role, and the target must still have no application tables or migration history.
+
+It inspects default ACLs before changing anything, then in one transaction runs only fixed `ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA public REVOKE ALL ON TABLES/SEQUENCES FROM anon/authenticated` statements. It checks the resulting catalog state before commit. The scope is limited to future `public` tables and sequences created by the verified application owner. It does not alter existing table or sequence grants, global defaults, `PUBLIC` grants, roles, schemas, event triggers, or defaults owned by `supabase_admin`. The observed `supabase_admin` defaults remain visible in preflight and are compared with the known catalog snapshot; unexpected owners or ACL entries stop for review. If preconditions or postconditions fail, the transaction rolls back and the command exits nonzero. Do not use it to repair an ambiguous target or after a partial initialization.
+
+After preparation succeeds, rerun the read-only preflight and confirm the application owner's relevant public defaults are absent. A successful preparation changes only those owner-specific defaults; it does not initialize the schema or apply migrations. Do not run this command against Production.
+
 For a new, verified staging project, the intended order is:
 
-1. `bun run db:init:supabase-staging -- --confirm-staging-initialize` applies the immutable fresh baseline through `0005`, then verifies the baseline history marker and application objects.
-2. `bun run db:migrate:supabase-staging -- --confirm-staging-migrate` validates the baseline and any known forward-history prefix, then applies pending migrations using Drizzle's normal `drizzle.__drizzle_migrations` history table. The expected forward migrations are `0006_contact-inquiries` and `0007_application-table-rls-api-hardening`, each once. Later migrations must retain timestamps later than their predecessors.
-3. Independently verify the schema and history before configuring the Vercel Preview runtime.
+1. Run the read-only preflight and resolve any reported conflicts manually.
+2. If it reports unsafe defaults for the application migration owner, run the separately guarded preparation command above, then rerun preflight.
+3. `bun run db:init:supabase-staging -- --confirm-staging-initialize` applies the immutable fresh baseline through `0005`, then verifies the baseline history marker and application objects.
+4. `bun run db:migrate:supabase-staging -- --confirm-staging-migrate` validates the baseline and any known forward-history prefix, then applies pending migrations using Drizzle's normal `drizzle.__drizzle_migrations` history table. The expected forward migrations are `0006_contact-inquiries` and `0007_application-table-rls-api-hardening`, each once. Later migrations must retain timestamps later than their predecessors.
+5. Independently verify the schema and history before configuring the Vercel Preview runtime.
 
 The scripts reject conflicting `public` objects, any existing Drizzle schema/history at baseline initialization, inconsistent Drizzle records, and a present `supabase_migrations` schema. Both staging commands require the Supabase `anon` and `authenticated` roles. Any such target requires manual review; do not retry after a partial failure or repair history by manually inserting rows. The initializer only reads catalog information before applying the baseline, and its baseline SQL does not modify Supabase-managed schemas. Platform extension-owned objects in `public` are allowed; other non-extension objects fail closed. Do not run Supabase CLI `db push` against this application database: Drizzle is the current migration authority, and Supabase CLI maintains a separate history table.
 

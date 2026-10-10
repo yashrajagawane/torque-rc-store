@@ -9,6 +9,7 @@ import {
   assertStagingBaselineState,
   assertStagingDataApiRoles,
   assertStagingDataApiPrivileges,
+  assertStagingDefaultAclInventory,
   assertStagingIdentity,
   assertStagingRequiredSchemas,
   assertStagingInitializationState,
@@ -27,7 +28,7 @@ import {
 import { loadVerifiedSupabaseStagingSslOptions } from '../src/db/supabase-staging-tls.ts';
 
 export type StagingMode = 'initialize' | 'migrate';
-type DiagnosticMode = StagingMode | 'preflight';
+type DiagnosticMode = StagingMode | 'preflight' | 'default-privilege-preparation';
 
 export type StagingRuntime = {
   inspect: () => Promise<StagingCatalogState>;
@@ -53,6 +54,11 @@ export type StagingRunnerDependencies = {
 export type StagingPreflightRuntime = Pick<StagingRuntime, 'inspect' | 'close'>;
 export type StagingPreflightDependencies = Omit<StagingRunnerDependencies, 'open'> & {
   open: (settings: StagingDatabaseSettings) => Promise<StagingPreflightRuntime>;
+};
+
+export type DefaultPrivilegePreparationDependencies = {
+  open: (settings: StagingDatabaseSettings) => Promise<{ client: PoolClient; close: () => Promise<void> }>;
+  applicationTableNames: string[];
 };
 
 /** Preserve rows returned by the catalog audit when assembling a staging snapshot. */
@@ -121,9 +127,115 @@ const declaredApplicationTables = [
 ];
 const declaredApplicationTableNames = declaredApplicationTables.map((table) => getTableConfig(table).name);
 
+async function createStagingPool(settings: StagingDatabaseSettings) {
+  const { Pool } = await import('pg');
+  const ssl = settings.ssl
+    ? await loadVerifiedSupabaseStagingSslOptions(settings.caFilePath)
+    : false;
+  return new Pool({
+    host: settings.host,
+    port: settings.port,
+    database: settings.database,
+    user: settings.user,
+    password: settings.password,
+    ssl,
+    max: 1,
+    connectionTimeoutMillis: 5000,
+    statement_timeout: 8000,
+    options: '-c search_path=public',
+    application_name: 'flyrc-supabase-staging-schema-task',
+  });
+}
+
+const automaticRlsCatalogSql = `
+  SELECT n.nspname AS schema, p.proname AS name, p.oid::text AS "objectId", p.pronargs::integer AS "argumentCount",
+         pg_get_function_identity_arguments(p.oid) AS "identityArguments",
+         pg_get_userbyid(p.proowner) AS owner, l.lanname AS language,
+         pg_get_function_result(p.oid) AS "returnType", p.prosecdef AS "securityDefiner",
+         p.proisstrict AS strict, p.provolatile AS volatility, p.proconfig AS configuration,
+         length(p.prosrc)::integer AS "sourceLength", md5(p.prosrc) AS "sourceMd5"
+  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
+  WHERE n.nspname = 'public' AND p.proname = 'rls_auto_enable'
+`;
+
+const eventTriggerCatalogSql = `
+  SELECT e.evtname AS name, pg_get_userbyid(e.evtowner) AS owner, e.evtenabled AS enabled,
+         e.evtevent AS event, e.evttags AS tags, e.evtfoid::text AS "triggerHandlerObjectId",
+         hn.nspname AS "handlerSchema", hp.proname AS "handlerName", hp.pronargs::integer AS "handlerArgumentCount",
+         pg_get_function_identity_arguments(hp.oid) AS "handlerIdentityArguments",
+         pg_get_userbyid(hp.proowner) AS "handlerOwner", hl.lanname AS "handlerLanguage",
+         pg_get_function_result(hp.oid) AS "handlerReturnType", hp.prosecdef AS "handlerSecurityDefiner",
+         hp.proisstrict AS "handlerStrict", hp.provolatile AS "handlerVolatility", hp.proconfig AS "handlerConfiguration",
+         hp.proretset AS "handlerReturnsSet", length(hp.prosrc)::integer AS "handlerSourceLength",
+         md5(hp.prosrc) AS "handlerSourceMd5", hp.oid::text AS "handlerObjectId"
+  FROM pg_event_trigger e JOIN pg_proc hp ON hp.oid = e.evtfoid
+  JOIN pg_namespace hn ON hn.oid = hp.pronamespace JOIN pg_language hl ON hl.oid = hp.prolang
+  ORDER BY e.evtname
+`;
+
+const defaultAclInventorySql = `
+  SELECT pg_get_userbyid(d.defaclrole) AS owner, COALESCE(ns.nspname, '<global>') AS schema,
+         CASE d.defaclobjtype WHEN 'r' THEN 'table' WHEN 'S' THEN 'sequence' END AS "objectType",
+         CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END AS grantee,
+         acl.privilege_type AS privilege
+  FROM pg_default_acl d CROSS JOIN LATERAL aclexplode(d.defaclacl) acl
+  LEFT JOIN pg_namespace ns ON ns.oid = d.defaclnamespace
+  LEFT JOIN pg_roles grantee ON grantee.oid = acl.grantee
+  WHERE d.defaclobjtype IN ('r', 'S') AND (d.defaclnamespace = 0 OR ns.nspname = 'public')
+    AND acl.grantee <> d.defaclrole
+  ORDER BY owner, schema, "objectType", grantee, privilege
+`;
+
+const publicObjectInventorySql = `
+  SELECT c.relname AS name, 'relation' AS kind,
+    EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e') AS "extensionOwned"
+  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname = 'public' AND c.relkind IN ('r','p','v','m','S','f','i','I')
+  UNION ALL
+  SELECT p.proname, 'routine',
+    EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
+  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public'
+  UNION ALL
+  SELECT t.typname, 'type',
+    EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e')
+  FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+  WHERE n.nspname = 'public' AND t.typtype <> 'p' AND NOT (t.typelem <> 0 AND t.typcategory = 'A')
+  UNION ALL
+  SELECT o.oprname, 'operator', EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_operator'::regclass AND d.objid = o.oid AND d.deptype = 'e')
+  FROM pg_operator o JOIN pg_namespace n ON n.oid = o.oprnamespace WHERE n.nspname = 'public'
+  UNION ALL
+  SELECT o.opcname, 'operator_class', EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_opclass'::regclass AND d.objid = o.oid AND d.deptype = 'e')
+  FROM pg_opclass o JOIN pg_namespace n ON n.oid = o.opcnamespace WHERE n.nspname = 'public'
+  UNION ALL
+  SELECT o.opfname, 'operator_family', EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_opfamily'::regclass AND d.objid = o.oid AND d.deptype = 'e')
+  FROM pg_opfamily o JOIN pg_namespace n ON n.oid = o.opfnamespace WHERE n.nspname = 'public'
+  UNION ALL
+  SELECT c.collname, 'collation', EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_collation'::regclass AND d.objid = c.oid AND d.deptype = 'e')
+  FROM pg_collation c JOIN pg_namespace n ON n.oid = c.collnamespace WHERE n.nspname = 'public'
+  UNION ALL
+  SELECT c.conname, 'conversion', EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_conversion'::regclass AND d.objid = c.oid AND d.deptype = 'e')
+  FROM pg_conversion c JOIN pg_namespace n ON n.oid = c.connamespace WHERE n.nspname = 'public'
+  UNION ALL
+  SELECT c.cfgname, 'text_search_config', EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_ts_config'::regclass AND d.objid = c.oid AND d.deptype = 'e')
+  FROM pg_ts_config c JOIN pg_namespace n ON n.oid = c.cfgnamespace WHERE n.nspname = 'public'
+  UNION ALL
+  SELECT d.dictname, 'text_search_dictionary', EXISTS (SELECT 1 FROM pg_depend dep WHERE dep.classid = 'pg_ts_dict'::regclass AND dep.objid = d.oid AND dep.deptype = 'e')
+  FROM pg_ts_dict d JOIN pg_namespace n ON n.oid = d.dictnamespace WHERE n.nspname = 'public'
+  UNION ALL
+  SELECT p.prsname, 'text_search_parser', EXISTS (SELECT 1 FROM pg_depend dep WHERE dep.classid = 'pg_ts_parser'::regclass AND dep.objid = p.oid AND dep.deptype = 'e')
+  FROM pg_ts_parser p JOIN pg_namespace n ON n.oid = p.prsnamespace WHERE n.nspname = 'public'
+  UNION ALL
+  SELECT t.tmplname, 'text_search_template', EXISTS (SELECT 1 FROM pg_depend dep WHERE dep.classid = 'pg_ts_template'::regclass AND dep.objid = t.oid AND dep.deptype = 'e')
+  FROM pg_ts_template t JOIN pg_namespace n ON n.oid = t.tmplnamespace WHERE n.nspname = 'public'
+  UNION ALL
+  SELECT s.stxname, 'statistics', EXISTS (SELECT 1 FROM pg_depend dep WHERE dep.classid = 'pg_statistic_ext'::regclass AND dep.objid = s.oid AND dep.deptype = 'e')
+  FROM pg_statistic_ext s JOIN pg_namespace n ON n.oid = s.stxnamespace WHERE n.nspname = 'public'
+`;
+
 function diagnostic(mode: DiagnosticMode, stage: string) {
   const subject = mode === 'initialize' ? 'Staging baseline initialization'
-    : mode === 'migrate' ? 'Staging migration' : 'Read-only staging preflight';
+    : mode === 'migrate' ? 'Staging migration'
+      : mode === 'default-privilege-preparation' ? 'Staging default-privilege preparation' : 'Read-only staging preflight';
   return `[SUPABASE_STAGING_${stage}] ${subject} ${stage.toLowerCase().replaceAll('_', ' ')}; no credentials or database details are included.`;
 }
 
@@ -303,6 +415,12 @@ export async function runSupabaseStagingPreflight(
       report(`API role ${safeName(role.role)}: isolation_predicate=${roleIsolation}; inherits_runtime_owner=${role.inheritsRuntimeOwner}; owner_membership_path=${role.memberOfRuntimeOwner}; superuser=${role.superuser}; bypass_rls=${role.bypassRls}; public_usage=${role.publicUsage}(informational); public_create_absent=${!role.publicCreate}; auth_usage=${role.authUsage}(informational); auth_create_absent=${!role.authCreate}; storage_usage=${role.storageUsage}(informational); storage_create_absent=${!role.storageCreate}; drizzle_usage=${role.drizzleUsage}(informational); drizzle_create_absent=${!role.drizzleCreate}; effective_app_table_privileges_absent=${noEffectiveAppTableGrants}(count=${role.applicationTablePrivileges.length}); effective_app_column_privileges_absent=${noEffectiveAppColumnGrants}(count=${role.applicationColumnPrivileges.length}); effective_app_sequence_privileges_absent=${noEffectiveAppSequenceGrants}(count=${role.applicationSequencePrivileges.length}); current_public_anon_authenticated_acl_absent=${noCurrentAppAcl}(table=${role.directApplicationTableAcl.length},column=${role.directApplicationColumnAcl.length},sequence=${role.directApplicationSequenceAcl.length}); global_default_table_and_sequence_privileges_absent=${noGlobalDefaults}(table=${role.globalDefaultTablePrivileges.length},sequence=${role.globalDefaultSequencePrivileges.length}); public_default_table_and_sequence_privileges_absent=${noSchemaDefaults}(table=${role.schemaDefaultTablePrivileges.length},sequence=${role.schemaDefaultSequencePrivileges.length}).`);
     }
     report(`Privilege audit context: roles=${state.dataApiRoleAudit?.length ?? 0}; configured_runtime_role_equals_expected_migration_role=true; no_application_tables=${state.applicationTables.length === 0}; ordinary_schema_usage_is_informational=true; no_existing_application_grants=${(state.dataApiRoleAudit ?? []).every((role) => role.applicationTablePrivileges.length === 0 && role.applicationColumnPrivileges.length === 0 && role.applicationSequencePrivileges.length === 0)}.`);
+    const defaultCounts = new Map<string, number>();
+    for (const row of state.defaultAclInventory ?? []) {
+      const key = `${row.owner}/${row.schema}/${row.objectType}`;
+      defaultCounts.set(key, (defaultCounts.get(key) ?? 0) + 1);
+    }
+    report(`Default ACL inventory (owner/scope/object: count): ${[...defaultCounts.entries()].map(([key, count]) => `${safeName(key.split('/')[0] ?? '')}/${key.split('/')[1] === '<global>' ? 'global' : safeName(key.split('/')[1] ?? '')}/${safeName(key.split('/')[2] ?? '')}=${count}`).join(', ') || 'none'}. Migration owner checked=${safeName(settings.runtimeUser)}.`);
     report(`Application tables: ${state.applicationTables.map(safeName).join(', ') || 'none'} (count=${state.applicationTables.length}); RLS tables=${state.applicationRlsTables.map(safeName).join(', ') || 'none'}; policies=${state.applicationPolicies.map(safeName).join(', ') || 'none'}.`);
     report(`Drizzle history: ${state.migrationHistory.length ? state.migrationHistory.map((row) => `${row.createdAt}:${safeName(row.hash)}`).join(', ') : 'absent'}.`);
     report(`Supabase CLI migration history: schema=${state.supabaseMigrationSchemaExists ? 'present' : 'absent'}, records=${state.supabaseMigrationRecords}${state.supabaseMigrationEntries?.length ? `, entries=${state.supabaseMigrationEntries.map(safeName).join(',')}` : ''}.`);
@@ -312,6 +430,7 @@ export async function runSupabaseStagingPreflight(
     check('exact automatic-RLS function and event trigger', () => assertSupabaseAutomaticRlsConfiguration(state));
     check('required Data API roles', () => assertStagingDataApiRoles(state.dataApiRoles));
     check('Data API privilege isolation from runtime/migration owner and application tables', () => assertStagingDataApiPrivileges(state));
+    check('default ACL owner scope and Supabase-managed snapshot', () => assertStagingDefaultAclInventory(state.defaultAclInventory, settings.runtimeUser));
     check('baseline initialization preflight and migration-history eligibility', () => assertStagingInitializationState(state, [
       ...dependencies.expectedBaselineTables,
       ...dependencies.expectedBaselineTables.map((table) => `${table}_id_seq`),
@@ -346,6 +465,147 @@ export async function runSupabaseStagingPreflight(
  * first. Local integration tests may inject an explicitly verified loopback
  * target without making that path reachable from either staging CLI.
  */
+export async function runSupabaseStagingDefaultPrivilegePreparation(
+  args: string[],
+  env: Record<string, string | undefined>,
+  dependencies: DefaultPrivilegePreparationDependencies,
+  report: (line: string) => void = () => undefined,
+): Promise<number> {
+  let settings: StagingDatabaseSettings;
+  try {
+    settings = resolveSupabaseStagingSettings('prepare-default-privileges', args, env);
+    if (settings.runtimeUser === 'supabase_admin') throw new Error('The Supabase platform owner is not an application migration owner.');
+  } catch {
+    report(diagnostic('default-privilege-preparation', 'CONFIGURATION_INVALID'));
+    return 2;
+  }
+
+  let connection: Awaited<ReturnType<DefaultPrivilegePreparationDependencies['open']>> | undefined;
+  let transactionStarted = false;
+  let committed = false;
+  let stage = 'CONNECTION_FAILED';
+  let beforeApplicationCount = 0;
+  let afterApplicationCount = 0;
+  let exitCode = 1;
+  try {
+    connection = await dependencies.open(settings);
+    const client = connection.client;
+    await client.query('BEGIN');
+    transactionStarted = true;
+    stage = 'IDENTITY_FAILED';
+    const identityResult = await client.query<{
+      database: string; loginUser: string; user: string; currentSchema: string; searchPath: string; serverPort: number; transactionReadOnly: boolean;
+    }>(`SELECT current_database() AS database, session_user AS "loginUser", current_user AS user,
+               current_schema() AS "currentSchema", current_setting('search_path') AS "searchPath",
+               inet_server_port() AS "serverPort", current_setting('transaction_read_only')::boolean AS "transactionReadOnly"`);
+    const identity = identityResult.rows[0];
+    if (!identity || identity.transactionReadOnly !== false) throw new Error('writable transaction identity is unavailable');
+    assertStagingIdentity({ ...identity, serverPort: Number(identity.serverPort) }, settings);
+    if (identity.user !== settings.runtimeUser || identity.currentSchema !== 'public'
+      || identity.searchPath.replaceAll('"', '').split(',').map((part) => part.trim()).join(',') !== 'public') {
+      throw new Error('application owner or schema identity mismatch');
+    }
+
+    stage = 'TARGET_STATE_FAILED';
+    const schemas = await client.query<{ public: boolean; auth: boolean; storage: boolean; drizzle: boolean; supabaseMigrations: boolean;
+      drizzleHistory: boolean; supabaseHistory: boolean; applicationTables: string[] }>(`
+      SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='public') AS public,
+             EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='auth') AS auth,
+             EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='storage') AS storage,
+             EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='drizzle') AS drizzle,
+             EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='supabase_migrations') AS "supabaseMigrations",
+             to_regclass('drizzle.__drizzle_migrations') IS NOT NULL AS "drizzleHistory",
+             to_regclass('supabase_migrations.schema_migrations') IS NOT NULL AS "supabaseHistory",
+             ARRAY(
+               SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+               WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','S','f') AND c.relname=ANY($1::text[])
+               ORDER BY c.relname
+             ) AS "applicationTables"
+    `, [dependencies.applicationTableNames]);
+    const schemaState = schemas.rows[0];
+    if (!schemaState) throw new Error('schema state unavailable');
+    assertStagingRequiredSchemas({ public: schemaState.public, auth: schemaState.auth, storage: schemaState.storage,
+      drizzle: schemaState.drizzle, supabaseMigrations: schemaState.supabaseMigrations });
+    if (schemaState.drizzle || schemaState.drizzleHistory || schemaState.supabaseMigrations || schemaState.supabaseHistory
+      || schemaState.applicationTables.length) throw new Error('existing application objects or migration history');
+
+    const publicObjects = await client.query<{ name: string; kind: string; extensionOwned: boolean }>(publicObjectInventorySql);
+    const unexpectedPublicObjects = publicObjects.rows.filter((object) => !object.extensionOwned
+      && !(object.kind === 'routine' && object.name === 'rls_auto_enable'));
+    if (unexpectedPublicObjects.length) throw new Error('unexpected public objects require manual review');
+
+    stage = 'EVENT_TRIGGER_FAILED';
+    const functionResult = await client.query<StagingCatalogState['supabaseAutomaticRlsFunctions'][number]>(automaticRlsCatalogSql);
+    const triggerResult = await client.query<StagingCatalogState['eventTriggers'][number]>(eventTriggerCatalogSql);
+    assertSupabaseAutomaticRlsConfiguration({ supabaseAutomaticRlsFunctions: functionResult.rows, eventTriggers: triggerResult.rows }, settings.automaticRlsRequired);
+
+    stage = 'ROLE_AUDIT_FAILED';
+    const roleResult = await client.query<{ role: string; superuser: boolean; bypassRls: boolean; inheritsOwner: boolean;
+      memberOfOwner: boolean; publicCreate: boolean; authCreate: boolean; storageCreate: boolean }>(`
+      SELECT r.rolname AS role, r.rolsuper AS superuser, r.rolbypassrls AS "bypassRls",
+             pg_has_role(r.rolname, current_user, 'USAGE') AS "inheritsOwner",
+             pg_has_role(r.rolname, current_user, 'MEMBER') AS "memberOfOwner",
+             has_schema_privilege(r.rolname, 'public', 'CREATE') AS "publicCreate",
+             has_schema_privilege(r.rolname, 'auth', 'CREATE') AS "authCreate",
+             has_schema_privilege(r.rolname, 'storage', 'CREATE') AS "storageCreate"
+      FROM pg_roles r WHERE r.rolname IN ('anon','authenticated') ORDER BY r.rolname
+    `);
+    const roleRows = roleResult.rows;
+    assertStagingDataApiRoles(roleRows.map((role) => role.role));
+    if (roleRows.length !== 2 || roleRows.some((role) => [role.superuser, role.bypassRls, role.inheritsOwner, role.memberOfOwner,
+      role.publicCreate, role.authCreate, role.storageCreate].some((value) => typeof value !== 'boolean')
+      || role.superuser || role.bypassRls || role.inheritsOwner
+      || role.memberOfOwner || role.publicCreate || role.authCreate || role.storageCreate)) {
+      throw new Error('Data API roles have unsafe effective or schema privileges');
+    }
+
+    stage = 'DEFAULT_ACL_PRECHECK_FAILED';
+    const beforeAclResult = await client.query<NonNullable<StagingCatalogState['defaultAclInventory']>[number]>(defaultAclInventorySql);
+    const beforeAcl = beforeAclResult.rows;
+    assertStagingDefaultAclInventory(beforeAcl, settings.runtimeUser, true);
+    beforeApplicationCount = beforeAcl.filter((row) => row.owner === settings.runtimeUser).length;
+
+    stage = 'DEFAULT_ACL_REVOKE_FAILED';
+    await client.query('ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA public REVOKE ALL ON TABLES FROM anon');
+    await client.query('ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA public REVOKE ALL ON TABLES FROM authenticated');
+    await client.query('ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA public REVOKE ALL ON SEQUENCES FROM anon');
+    await client.query('ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA public REVOKE ALL ON SEQUENCES FROM authenticated');
+
+    stage = 'DEFAULT_ACL_POSTCHECK_FAILED';
+    const afterAclResult = await client.query<NonNullable<StagingCatalogState['defaultAclInventory']>[number]>(defaultAclInventorySql);
+    const afterAcl = afterAclResult.rows;
+    assertStagingDefaultAclInventory(afterAcl, settings.runtimeUser, false);
+    const platformBefore = beforeAcl.filter((row) => row.owner === 'supabase_admin').map((row) => JSON.stringify(row)).sort();
+    const platformAfter = afterAcl.filter((row) => row.owner === 'supabase_admin').map((row) => JSON.stringify(row)).sort();
+    if (JSON.stringify(platformBefore) !== JSON.stringify(platformAfter)) throw new Error('platform default ACL state changed');
+    afterApplicationCount = afterAcl.filter((row) => row.owner === settings.runtimeUser).length;
+    if (afterApplicationCount !== 0) throw new Error('application owner defaults remain');
+
+    stage = 'COMMIT_FAILED';
+    await client.query('COMMIT');
+    committed = true;
+    transactionStarted = false;
+    report(`PASS staging application-owner defaults hardened; owner=${settings.runtimeUser}; schema=public; relevant_grants_before=${beforeApplicationCount}; relevant_grants_after=${afterApplicationCount}; supabase_admin_defaults_unchanged=${platformBefore.length === platformAfter.length}.`);
+    exitCode = 0;
+  } catch {
+    if (transactionStarted && connection) await connection.client.query('ROLLBACK').catch(() => undefined);
+    transactionStarted = false;
+    report(diagnostic('default-privilege-preparation', stage));
+    exitCode = 1;
+  } finally {
+    if (connection) {
+      try {
+        await connection.close();
+      } catch {
+        report(diagnostic('default-privilege-preparation', 'CONNECTION_CLOSE_FAILED'));
+        if (committed) report('WARNING transaction committed but connection cleanup reported a failure.');
+        exitCode = 1;
+      }
+    }
+  }
+  return exitCode;
+}
+
 export async function runSupabaseStagingOperations(
   mode: StagingMode,
   settings: StagingDatabaseSettings,
@@ -570,26 +830,7 @@ export async function loadStagingRunnerDependencies(
 }
 
 export async function openPostgresRuntime(settings: StagingDatabaseSettings, readOnly = false): Promise<StagingRuntime> {
-  const [{ Pool }, { drizzle }] = await Promise.all([
-    import('pg'),
-    import('drizzle-orm/node-postgres'),
-  ]);
-  const ssl = settings.ssl
-    ? await loadVerifiedSupabaseStagingSslOptions(settings.caFilePath)
-    : false;
-  const pool = new Pool({
-    host: settings.host,
-    port: settings.port,
-    database: settings.database,
-    user: settings.user,
-    password: settings.password,
-    ssl,
-    max: 1,
-    connectionTimeoutMillis: 5000,
-    statement_timeout: 8000,
-    options: '-c search_path=public',
-    application_name: 'flyrc-supabase-staging-schema-task',
-  });
+  const [{ drizzle }, pool] = await Promise.all([import('drizzle-orm/node-postgres'), createStagingPool(settings)]);
   let inspectionClient: PoolClient | undefined;
   let readOnlySession: Awaited<ReturnType<typeof openVerifiedReadOnlySession<PoolClient>>> | undefined;
   try {
@@ -673,36 +914,8 @@ export async function openPostgresRuntime(settings: StagingDatabaseSettings, rea
     const drizzleObjectResult = await catalogConnection.query<{ name: string; kind: string; extensionOwned: boolean }>(
       objectInventoryQuery.replaceAll("n.nspname = 'public'", "n.nspname = 'drizzle'"),
     );
-    const automaticRlsFunctionResult = await catalogConnection.query<StagingCatalogState['supabaseAutomaticRlsFunctions'][number]>(`
-      SELECT n.nspname AS schema, p.proname AS name, p.oid::text AS "objectId", p.pronargs::integer AS "argumentCount",
-             pg_get_function_identity_arguments(p.oid) AS "identityArguments",
-             pg_get_userbyid(p.proowner) AS owner, l.lanname AS language,
-             pg_get_function_result(p.oid) AS "returnType", p.prosecdef AS "securityDefiner",
-             p.proisstrict AS strict, p.provolatile AS volatility, p.proconfig AS configuration,
-             length(p.prosrc)::integer AS "sourceLength", md5(p.prosrc) AS "sourceMd5"
-      FROM pg_proc p
-      JOIN pg_namespace n ON n.oid = p.pronamespace
-      JOIN pg_language l ON l.oid = p.prolang
-      WHERE n.nspname = 'public' AND p.proname = 'rls_auto_enable'
-    `);
-    const eventTriggerResult = await catalogConnection.query<StagingCatalogState['eventTriggers'][number]>(`
-      SELECT e.evtname AS name, pg_get_userbyid(e.evtowner) AS owner, e.evtenabled AS enabled,
-             e.evtevent AS event, e.evttags AS tags, e.evtfoid::text AS "triggerHandlerObjectId",
-             hn.nspname AS "handlerSchema", hp.proname AS "handlerName",
-             hp.pronargs::integer AS "handlerArgumentCount",
-             pg_get_function_identity_arguments(hp.oid) AS "handlerIdentityArguments",
-             pg_get_userbyid(hp.proowner) AS "handlerOwner", hl.lanname AS "handlerLanguage",
-             pg_get_function_result(hp.oid) AS "handlerReturnType", hp.prosecdef AS "handlerSecurityDefiner",
-             hp.proisstrict AS "handlerStrict", hp.provolatile AS "handlerVolatility",
-             hp.proconfig AS "handlerConfiguration", hp.proretset AS "handlerReturnsSet",
-             length(hp.prosrc)::integer AS "handlerSourceLength", md5(hp.prosrc) AS "handlerSourceMd5",
-             hp.oid::text AS "handlerObjectId"
-      FROM pg_event_trigger e
-      JOIN pg_proc hp ON hp.oid = e.evtfoid
-      JOIN pg_namespace hn ON hn.oid = hp.pronamespace
-      JOIN pg_language hl ON hl.oid = hp.prolang
-      ORDER BY e.evtname
-    `);
+    const automaticRlsFunctionResult = await catalogConnection.query<StagingCatalogState['supabaseAutomaticRlsFunctions'][number]>(automaticRlsCatalogSql);
+    const eventTriggerResult = await catalogConnection.query<StagingCatalogState['eventTriggers'][number]>(eventTriggerCatalogSql);
     const drizzleSchema = await catalogConnection.query<{ exists: boolean }>(`SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = 'drizzle') AS exists`);
     const schemaRows = await catalogConnection.query<{ schema_name: string }>(`
       SELECT nspname AS schema_name FROM pg_namespace
@@ -831,6 +1044,7 @@ export async function openPostgresRuntime(settings: StagingDatabaseSettings, rea
              ) AS "schemaDefaultSequencePrivileges"
       FROM pg_roles r WHERE r.rolname IN ('anon', 'authenticated') ORDER BY r.rolname
     `, [settings.runtimeUser, declaredApplicationTableNames]);
+    const defaultAclInventory = await catalogConnection.query<NonNullable<StagingCatalogState['defaultAclInventory']>[number]>(defaultAclInventorySql);
     let supabaseMigrationRecords = 0;
     let supabaseMigrationEntries: string[] = [];
     if (supabaseSchema.rows[0]?.exists) {
@@ -920,6 +1134,7 @@ export async function openPostgresRuntime(settings: StagingDatabaseSettings, rea
       supabaseMigrationRecords,
       supabaseMigrationEntries,
       dataApiRoles: dataApiRoles.rows.map((row) => row.rolname),
+      defaultAclInventory: defaultAclInventory.rows,
       applicationTables: tableRows.rows.map((row) => row.tablename),
       applicationColumns: columns,
       applicationIndexes: indexRows.rows.map((row) => row.indexname),
@@ -962,6 +1177,36 @@ export async function openPostgresRuntime(settings: StagingDatabaseSettings, rea
 export async function openPostgresReadOnlyRuntime(settings: StagingDatabaseSettings): Promise<StagingPreflightRuntime> {
   const runtime = await openPostgresRuntime(settings, true);
   return { inspect: runtime.inspect, close: runtime.close };
+}
+
+async function openPostgresDefaultPrivilegeConnection(settings: StagingDatabaseSettings) {
+  const pool = await createStagingPool(settings);
+  let client: PoolClient | undefined;
+  try {
+    client = await pool.connect();
+  } catch (error) {
+    await pool.end().catch(() => undefined);
+    throw error;
+  }
+  let closed = false;
+  return {
+    client,
+    close: async () => {
+      if (closed) return;
+      closed = true;
+      let closeError: unknown;
+      try { client!.release(); } catch (error) { closeError = error; }
+      try { await pool.end(); } catch (error) { closeError ??= error; }
+      if (closeError) throw closeError;
+    },
+  };
+}
+
+export async function runDefaultPrivilegePreparationCli(args = process.argv.slice(2), env = process.env) {
+  return runSupabaseStagingDefaultPrivilegePreparation(args, env, {
+    open: openPostgresDefaultPrivilegeConnection,
+    applicationTableNames: declaredApplicationTableNames,
+  }, console.log);
 }
 
 export async function runPreflightCli(args = process.argv.slice(2), env = process.env) {
