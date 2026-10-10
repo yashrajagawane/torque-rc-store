@@ -609,7 +609,7 @@ Copy the connection settings from the dedicated staging project's Supabase Conne
 
 ### Staging database initialization gate
 
-No Supabase project was connected or migrated as part of this setup. The fresh initializer counts relations outside PostgreSQL system schemas; a managed Supabase project contains platform-managed relations and will normally be rejected as non-empty. Do not bypass that guard. Legacy migrations `0000`–`0005` assume the original application tables already exist and are not a blank-database chain. Before initializing Supabase staging, independently verify its project reference and database identity, inspect `public` and `drizzle` for application objects/history, and approve a Supabase-compatible baseline path. If the initializer rejects managed objects, stop and prepare a reviewed Supabase-aware initializer that checks conflicting application tables/history without changing managed schemas. Do not apply migrations until this prerequisite is resolved. Never import Production customer, order, inventory, or inquiry data into staging.
+No Supabase project should be initialized until its project reference, database identity, `public` schema state, and migration history have been independently verified. The generic `db:init:fresh` command remains strict for a physically relation-empty PostgreSQL target and has not been relaxed for managed Supabase objects. Separate guarded Supabase staging commands have been implemented; they inspect application-owned objects and preserve platform-managed schemas. Never import Production customer, order, inventory, or inquiry data into staging.
 
 After the target is verified and the appropriate baseline is approved, migrate only that staging target and inspect the schema/history. Expected history is a baseline through `0005`, followed by `0006_contact-inquiries` and `0007_application-table-rls-api-hardening` exactly once each. Do not rerun migrations to force a partial result to pass.
 
@@ -625,20 +625,47 @@ Required environment names:
 |---|---|
 | `SUPABASE_STAGING_ENABLED` | Explicit opt-in; exact value `true`. |
 | `SUPABASE_STAGING_PROJECT_REF` | Owner-verified staging project reference. |
-| `SUPABASE_PRODUCTION_PROJECT_REF` | Owner-verified Production project reference; must differ from staging. |
+| `SUPABASE_PRODUCTION_PROJECT_REF` | Owner-verified Production project reference; required in normal mode and must differ from staging. Leave unset only in explicit no-Production mode. |
+| `SUPABASE_NO_PRODUCTION_PROJECT` | Explicit mode only while no separate Production Supabase project exists; exact value `true`. |
+| `SUPABASE_NO_PRODUCTION_PROJECT_CONFIRMATION` | Required in no-Production mode; exact value `I_CONFIRM_NO_PRODUCTION_SUPABASE_PROJECT`. |
 | `SUPABASE_STAGING_DATABASE_URL` | Explicit staging-only migration URL with username/password and SSL required. |
 | `SUPABASE_STAGING_DATABASE_HOST` | Exact host copied from the staging Connect dialog. |
 | `SUPABASE_STAGING_DATABASE_PORT` | Exact port copied from that connection mode. |
 | `SUPABASE_STAGING_DATABASE_NAME` | Expected connected database name. |
 | `SUPABASE_STAGING_DATABASE_USER` | Expected connected role; shared-pooler usernames include the project reference. |
+| `SUPABASE_STAGING_DATABASE_CA_FILE` | Absolute local path to the official Supabase database root CA certificate downloaded from the staging project's Dashboard. Required by every guarded staging database command; the file must remain outside tracked source. |
 | `SUPABASE_STAGING_DATABASE_EFFECTIVE_USER` | Expected PostgreSQL `current_user` after connection; set independently because a shared-pooler login name may differ from the database role. |
 | `SUPABASE_STAGING_RUNTIME_DATABASE_USER` | Expected Express runtime role; it must equal the migration owner role for this RLS-without-policies design. |
 | `SUPABASE_STAGING_SCHEMA` | Must be `public` for the current unqualified baseline SQL. |
 | `SUPABASE_STAGING_TARGET_FINGERPRINT` | Exact normalized `host:port/database/user` confirmation value. |
 | `SUPABASE_STAGING_INITIALIZATION_CONFIRMATION` | Must equal `I_CONFIRM_NEW_SUPABASE_STAGING_SCHEMA` for baseline initialization. |
 | `SUPABASE_STAGING_MIGRATION_CONFIRMATION` | Must equal `I_CONFIRM_SUPABASE_STAGING_MIGRATION` for forward migrations. |
+| `SUPABASE_STAGING_PREFLIGHT_CONFIRMATION` | Must equal `I_CONFIRM_READ_ONLY_SUPABASE_STAGING_PREFLIGHT` for the read-only catalog check. |
+| `SUPABASE_STAGING_PROBE_CONFIRMATION` | Must equal `I_CONFIRM_READ_ONLY_SUPABASE_STAGING_IDENTITY_PROBE` for the read-only identity probe. |
 
 Do not set generic `DATABASE_URL`, `MIGRATION_DATABASE_URL`, `FRESH_DATABASE_URL`, or discrete `SQL_*` settings to the same target when invoking these commands. The staging scripts use only `SUPABASE_STAGING_DATABASE_URL` and fail on configured target collisions or uncomparable targets. Each command validates target identity again. The PostgreSQL server's internal port is not compared to the host/pooler URL port. The connection explicitly starts with `search_path=public` and verifies `current_schema()` and the effective path before schema operations.
+
+Before any baseline or migration command, run the read-only check:
+
+```sh
+bun run db:check:supabase-staging -- --confirm-staging-preflight
+```
+
+It uses the same staging URL, project-reference, fingerprint, collision, TLS, role, and schema identity resolver as the staging commands, with a separate explicit read-only confirmation. Set only `SUPABASE_STAGING_PREFLIGHT_CONFIRMATION` for this command in addition to the shared target settings. The shared pooler URL username must include the project reference; the command reports the configured login name, PostgreSQL `session_user`, and effective `current_user` separately and checks the effective role against `SUPABASE_STAGING_DATABASE_EFFECTIVE_USER`. It also reports the pooler's configured port separately from PostgreSQL's internal port. The connection is opened with a read-only default transaction setting, and this CLI exposes only catalog inspection and connection close operations; it cannot call the Drizzle migrator.
+
+The check reports target identity, expected schemas, public/Drizzle objects, automatic-RLS metadata, API role inheritance and effective privileges, RLS/policy state, migration-history entries, and whether the current state passes the baseline initializer's existing preflight. A successful result means the target appears eligible for baseline initialization only. It does not initialize the schema or apply any migration. Any failed or ambiguous check requires manual investigation; never bypass it or repair the database automatically. This command's unit/mocked checks do not prove query compatibility with Supabase. The generic local initializer and the separately guarded staging baseline/migration commands retain their distinct behaviors and confirmations.
+
+If Fly RC Hobbies does not yet have a separate Production Supabase project, use the explicit no-Production-project mode: set `SUPABASE_NO_PRODUCTION_PROJECT=true`, leave `SUPABASE_PRODUCTION_PROJECT_REF` unset, and set `SUPABASE_NO_PRODUCTION_PROJECT_CONFIRMATION=I_CONFIRM_NO_PRODUCTION_SUPABASE_PROJECT`. This mode is supported by the read-only identity probe, preflight, and staging commands only when the exact confirmation and all ordinary command safeguards are also present. Initialization still requires its command flag and `SUPABASE_STAGING_INITIALIZATION_CONFIRMATION=I_CONFIRM_NEW_SUPABASE_STAGING_SCHEMA`; migration still requires its command flag and `SUPABASE_STAGING_MIGRATION_CONFIRMATION=I_CONFIRM_SUPABASE_STAGING_MIGRATION`. Thus, schema-changing commands carry the additional no-Production confirmation as well as their existing confirmations.
+
+Do not invent a Production reference, use the staging reference as a fake Production reference, or set both modes inconsistently. If `SUPABASE_PRODUCTION_PROJECT_REF` is supplied, no-Production mode and its confirmation must be unset, and the Production reference must be a valid 20-character lowercase alphanumeric reference distinct from staging. Revisit the configuration before creating a separate Production Supabase project: remove both no-Production settings and configure its independently verified project reference before any further staging initialization or migration command. A missing or inconsistent setting fails before a database connection.
+
+When the effective PostgreSQL role through the transaction pooler is not yet known, first run the separately guarded, read-only identity probe:
+
+```sh
+bun run db:probe:supabase-staging -- --confirm-staging-identity-probe
+```
+
+It requires the explicit staging URL, expected host/port/database/login/fingerprint, `SUPABASE_STAGING_ENABLED=true`, no-Production-project mode and confirmation, plus `SUPABASE_STAGING_PROBE_CONFIRMATION=I_CONFIRM_READ_ONLY_SUPABASE_STAGING_IDENTITY_PROBE`. It does not require `SUPABASE_STAGING_DATABASE_EFFECTIVE_USER` or `SUPABASE_STAGING_RUNTIME_DATABASE_USER`; discovering `current_user` is its purpose. The probe uses a read-only connection and reports the database, `session_user`, `current_user`, schema, search path, internal server port, and whether the effective role is superuser or bypasses RLS. It does not inspect application records, apply schema changes, or invoke a migrator. Failures use sanitized categories such as `TLS_FAILURE` or `IDENTITY_QUERY_FAILED`; only validated SQLSTATE or allowlisted system error codes may be shown. Raw messages and connection details are withheld, so a category narrows the failure stage but does not by itself prove the root cause. Review the reported role and then configure the effective/runtime role expectations for catalog preflight. Do not infer that the observed role is appropriate for application runtime merely because the probe succeeds.
 
 For a new, verified staging project, the intended order is:
 
@@ -647,6 +674,12 @@ For a new, verified staging project, the intended order is:
 3. Independently verify the schema and history before configuring the Vercel Preview runtime.
 
 The scripts reject conflicting `public` objects, any existing Drizzle schema/history at baseline initialization, inconsistent Drizzle records, and a present `supabase_migrations` schema. Both staging commands require the Supabase `anon` and `authenticated` roles. Any such target requires manual review; do not retry after a partial failure or repair history by manually inserting rows. The initializer only reads catalog information before applying the baseline, and its baseline SQL does not modify Supabase-managed schemas. Platform extension-owned objects in `public` are allowed; other non-extension objects fail closed. Do not run Supabase CLI `db push` against this application database: Drizzle is the current migration authority, and Supabase CLI maintains a separate history table.
+
+#### Supabase database TLS CA
+
+The staging probe and guarded staging database commands require TLS with certificate-chain and hostname verification. Download the **database root certificate** from the staging project's Supabase Dashboard under **Database Settings → SSL Configuration**. Do not save the pooler's leaf certificate from an ad hoc TLS handshake, and do not trust a certificate merely because the endpoint presented it. Verify the download came from the Dashboard for the intended project. Store it outside the repository, for example under `%USERPROFILE%\.config\fly-rc-hobbies\supabase-staging-root.crt`, and set `SUPABASE_STAGING_DATABASE_CA_FILE` to that absolute path in the local process environment before invoking a staging command. Do not set `sslmode=no-verify`, disable TLS, or use a global Node TLS-verification bypass. The repository ignores `/.local-certs/` if a certificate must temporarily be placed there, but an external user config directory is preferred.
+
+The staging probe supplies discrete `host`, `port`, `database`, and `user` fields to `pg`; it does not pass the connection URL to node-postgres. This avoids the driver's URL parser replacing an explicit SSL configuration. The URL is still parsed by the repository guard for identity checks and must retain `sslmode=require`. The pool receives the CA plus `rejectUnauthorized: true` and Node's normal `checkServerIdentity`; the configured pooler hostname is therefore checked against the certificate. A missing, unreadable, malformed, or non-CA file fails before a pool is created. The shared application database resolver is unchanged by this staging-only TLS correction.
 
 These safeguards do not establish a target as safe by themselves. Before the first hosted schema mutation, independently confirm the project reference in the Dashboard, verify that it is distinct from Production, inspect the application schema/history read-only, establish a staging-only backup/recovery path, and have a second reviewer verify the target. If a command fails after connection or leaves migration metadata, stop for manual inspection; do not rerun until the actual schema and history are reconciled.
 
@@ -679,6 +712,12 @@ Do not configure this as a Vercel Hobby Cron: Hobby supports only once-daily sch
 ### Backup and restore runbook
 
 The staging Supabase plan has not been independently verified. Current Supabase documentation states automatic daily database backups are available on Pro, Team, and Enterprise; Free projects are advised to make regular CLI exports and maintain off-site backups. Database backups do not include Storage API objects. Do not assume Free includes daily backups.
+
+#### Supabase automatic-RLS bootstrap object
+
+When the Supabase project is created with **Enable automatic RLS**, its initial public schema may contain the platform-created `public.rls_auto_enable()` function and the `ensure_rls` `ddl_command_end` event trigger. The staging runner recognizes only this exact pair: function owner `postgres`, PL/pgSQL, `event_trigger` return type, zero arguments, `SECURITY DEFINER`, non-strict, volatile, `search_path=pg_catalog`, source length `1055`, and `prosrc` MD5 `c44fb229ea8a6b0afd04a0a33261c16c`; paired with owner `postgres`, enabled status `O`, tags `CREATE TABLE`, `CREATE TABLE AS`, and `SELECT INTO`, and handler `public.rls_auto_enable()`. The runner also requires this catalog state to remain unchanged across initialization or migration and verifies that every application table has RLS enabled afterward. It never disables or drops this trigger.
+
+Any missing or differing function attribute, fingerprint, trigger property, association, or additional unexpected public object/event trigger stops the operation for manual review. The fingerprint allowlist is based on observed project metadata; local unit or PostgreSQL tests do not prove compatibility with the remote Supabase project or its current catalog. Do not update the allowlist from names alone.
 
 For staging-only logical backups, use Supabase CLI `db dump` with the verified staging project or PostgreSQL-native tools with an approved connection mode. The Supabase CLI excludes managed schemas by default and requires Docker. Keep files outside the repository/deployment artifact, encrypt with an approved key before off-site transfer, restrict access, and verify checksums. Example placeholders only:
 

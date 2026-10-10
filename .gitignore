@@ -8,3 +8,4 @@ coverage/
 *.log
 .env*
 !.env.example
+/.local-certs/

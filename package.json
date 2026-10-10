@@ -21,6 +21,8 @@
     "db:baseline:generate": "drizzle-kit generate --config=src/db/drizzle-fresh.config.ts --name=application-baseline",
     "db:init:fresh": "tsx scripts/initialize-fresh-database.ts",
     "db:init:supabase-staging": "tsx scripts/initialize-supabase-staging.ts",
+    "db:check:supabase-staging": "tsx scripts/check-supabase-staging.ts",
+    "db:probe:supabase-staging": "tsx scripts/probe-supabase-staging.ts",
     "db:migrate:supabase-staging": "tsx scripts/migrate-supabase-staging.ts",
     "db:migrate": "drizzle-kit migrate --config=src/db/drizzle.config.ts",
     "db:check": "drizzle-kit check --config=src/db/drizzle.config.ts",

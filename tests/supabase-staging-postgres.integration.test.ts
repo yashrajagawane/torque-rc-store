@@ -60,9 +60,11 @@ function localTargetFromEnvironment(): StagingDatabaseSettings {
     runtimeUser: decodeURIComponent(url.username),
     password: decodeURIComponent(url.password),
     projectRef: 'localtest000000000000',
+    connectionMode: 'direct',
     schema: 'public',
     ssl: false,
     fingerprint: `${target.host}:${target.port}/${target.database}/${decodeURIComponent(url.username)}`,
+    automaticRlsRequired: false,
   };
 }
 

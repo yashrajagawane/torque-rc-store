@@ -42,6 +42,20 @@ describe('fresh database initialization safety', () => {
     assert.throws(() => resolveFreshDatabaseSettings(['--confirm-empty-database'], { ...baseEnv, FRESH_DATABASE_EXPECTED_FINGERPRINT: 'localhost:55432/other' }), /fingerprint/);
   });
 
+  it('keeps generic fresh initialization independent of Supabase no-production settings', () => {
+    assert.doesNotThrow(() => resolveFreshDatabaseSettings(['--confirm-empty-database'], {
+      ...baseEnv,
+      SUPABASE_NO_PRODUCTION_PROJECT: 'true',
+      SUPABASE_NO_PRODUCTION_PROJECT_CONFIRMATION: 'I_CONFIRM_NO_PRODUCTION_SUPABASE_PROJECT',
+    }));
+    assert.throws(() => resolveFreshDatabaseSettings(['--confirm-empty-database'], {
+      ...baseEnv,
+      FRESH_DATABASE_ENABLED: undefined,
+      SUPABASE_NO_PRODUCTION_PROJECT: 'true',
+      SUPABASE_NO_PRODUCTION_PROJECT_CONFIRMATION: 'I_CONFIRM_NO_PRODUCTION_SUPABASE_PROJECT',
+    }));
+  });
+
   it('accepts Docker host-to-container port mapping and direct port mapping while checking database and user', () => {
     const dockerTarget = resolveFreshDatabaseSettings(['--confirm-empty-database'], {
       ...baseEnv,

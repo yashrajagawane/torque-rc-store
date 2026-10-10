@@ -7,9 +7,14 @@ import * as schema from '../src/db/schema.ts';
 import {
   assertStagingBaselineState,
   assertStagingDataApiRoles,
+  assertStagingDataApiPrivileges,
   assertStagingIdentity,
+  assertStagingRequiredSchemas,
   assertStagingInitializationState,
   assertStagingMigrationHistory,
+  assertSupabaseAutomaticRlsConfiguration,
+  assertSupabaseAutomaticRlsUnchanged,
+  isApprovedSupabaseAutomaticRlsRoutine,
   normalizeStagingSqlType,
   resolveSupabaseStagingSettings,
   type MigrationJournalEntry,
@@ -17,8 +22,10 @@ import {
   type StagingCatalogState,
   type StagingDatabaseSettings,
 } from '../src/db/supabase-staging-guard.ts';
+import { loadVerifiedSupabaseStagingSslOptions } from '../src/db/supabase-staging-tls.ts';
 
 export type StagingMode = 'initialize' | 'migrate';
+type DiagnosticMode = StagingMode | 'preflight';
 
 export type StagingRuntime = {
   inspect: () => Promise<StagingCatalogState>;
@@ -41,6 +48,11 @@ export type StagingRunnerDependencies = {
   expectedCurrentConstraints: string[];
 };
 
+export type StagingPreflightRuntime = Pick<StagingRuntime, 'inspect' | 'close'>;
+export type StagingPreflightDependencies = Omit<StagingRunnerDependencies, 'open'> & {
+  open: (settings: StagingDatabaseSettings) => Promise<StagingPreflightRuntime>;
+};
+
 const declaredApplicationTables = [
   schema.brands, schema.cartItems, schema.cartMergeOperations, schema.categories, schema.inventoryReservations,
   schema.orderItems, schema.orders, schema.paymentReviewCases, schema.products, schema.razorpayWebhookEvents,
@@ -48,8 +60,10 @@ const declaredApplicationTables = [
 ];
 const declaredApplicationTableNames = declaredApplicationTables.map((table) => getTableConfig(table).name);
 
-function diagnostic(mode: StagingMode, stage: string) {
-  return `[SUPABASE_STAGING_${stage}] ${mode === 'initialize' ? 'Staging baseline initialization' : 'Staging migration'} ${stage.toLowerCase().replaceAll('_', ' ')}; no credentials or database details are included.`;
+function diagnostic(mode: DiagnosticMode, stage: string) {
+  const subject = mode === 'initialize' ? 'Staging baseline initialization'
+    : mode === 'migrate' ? 'Staging migration' : 'Read-only staging preflight';
+  return `[SUPABASE_STAGING_${stage}] ${subject} ${stage.toLowerCase().replaceAll('_', ' ')}; no credentials or database details are included.`;
 }
 
 function assertSchemaState(state: StagingCatalogState, expected: Pick<StagingRunnerDependencies,
@@ -69,7 +83,9 @@ function assertSchemaState(state: StagingCatalogState, expected: Pick<StagingRun
     ...indexes,
     ...constraints,
   ]);
-  if (state.publicObjects.some((object) => !object.extensionOwned && (object.kind !== 'relation' || !permittedObjects.has(object.name)))) {
+  if (state.publicObjects.some((object) => !object.extensionOwned
+    && !isApprovedSupabaseAutomaticRlsRoutine(state, object)
+    && (object.kind !== 'relation' || !permittedObjects.has(object.name)))) {
     throw new Error('public schema contains unexpected objects');
   }
   const actualRls = new Set(state.applicationRlsTables);
@@ -127,6 +143,115 @@ export async function runSupabaseStagingCommand(
   return runSupabaseStagingOperations(mode, settings, dependencies, report);
 }
 
+/** Read-only preflight: this dependency surface intentionally exposes no migration methods. */
+export async function runSupabaseStagingPreflight(
+  args: string[],
+  env: Record<string, string | undefined>,
+  dependencies: StagingPreflightDependencies,
+  report: (line: string) => void = () => undefined,
+): Promise<number> {
+  const requiredSettings = [
+    'SUPABASE_STAGING_ENABLED', 'SUPABASE_STAGING_PROJECT_REF',
+    'SUPABASE_STAGING_DATABASE_URL', 'SUPABASE_STAGING_DATABASE_HOST', 'SUPABASE_STAGING_DATABASE_PORT',
+    'SUPABASE_STAGING_DATABASE_NAME', 'SUPABASE_STAGING_DATABASE_USER', 'SUPABASE_STAGING_DATABASE_EFFECTIVE_USER',
+    'SUPABASE_STAGING_RUNTIME_DATABASE_USER', 'SUPABASE_STAGING_SCHEMA', 'SUPABASE_STAGING_TARGET_FINGERPRINT',
+    'SUPABASE_STAGING_PREFLIGHT_CONFIRMATION',
+  ];
+  const missingSettings = requiredSettings.filter((name) => !env[name]?.trim());
+  if (missingSettings.length) {
+    report(`FAIL missing required local configuration names: ${missingSettings.join(', ')}. No database connection was attempted.`);
+    return 2;
+  }
+  let settings: StagingDatabaseSettings;
+  try {
+    settings = resolveSupabaseStagingSettings('check', args, env);
+    if (dependencies.baseline.tag !== '0000_application-baseline'
+      || dependencies.forward[0]?.tag !== '0006_contact-inquiries'
+      || dependencies.forward[1]?.tag !== '0007_application-table-rls-api-hardening'
+      || dependencies.forward.some((entry, index) => entry.when <= dependencies.baseline.when
+        || (index > 0 && entry.when <= dependencies.forward[index - 1]!.when))) throw new Error('invalid migration journal');
+  } catch {
+    report(diagnostic('preflight', 'CONFIGURATION_INVALID'));
+    return 2;
+  }
+
+  let runtime: StagingPreflightRuntime | undefined;
+  let failures = 0;
+  let result = 1;
+  const check = (name: string, fn: () => void) => {
+    try {
+      fn();
+      report(`PASS ${name}`);
+    } catch {
+      failures += 1;
+      report(`FAIL ${name}; manual review required.`);
+    }
+  };
+  try {
+    report('PASS explicit staging configuration and target fingerprint validated.');
+    runtime = await dependencies.open(settings);
+    const state = await runtime.inspect();
+    let identityValid = true;
+    try {
+      assertStagingIdentity(state.identity, settings);
+    } catch {
+      identityValid = false;
+      failures += 1;
+      report('FAIL connected database identity, login/effective role, public schema, or search path mismatch; catalog details withheld.');
+    }
+    if (!identityValid) return 1;
+    report('PASS connected database identity: configured endpoint login, observed session role, expected effective role, database, schema, search path, and internal server port verified.');
+
+    const safeName = (value: string) => /^[A-Za-z_][A-Za-z0-9_$]{0,62}$/.test(value) ? value : '[nonstandard-name]';
+    const safeDigest = (value: string) => /^[a-f0-9]{32}$/i.test(value) ? value : '[invalid-digest]';
+    report(`Target: fingerprint=${settings.fingerprint}; endpoint=${settings.connectionMode}; configured_login=${safeName(settings.user)}; session_user=${safeName(state.identity.loginUser)}; current_user=${safeName(state.identity.user)}; database=${safeName(state.identity.database)}; current_schema=${safeName(state.identity.currentSchema)}; search_path=${safeName(state.identity.searchPath)}; server_port=${state.identity.serverPort}; transaction_read_only=${state.identity.transactionReadOnly === true}.`);
+    report(`Schemas: public=${state.schemas.public ? 'present' : 'absent'}, auth=${state.schemas.auth ? 'present' : 'absent'}, storage=${state.schemas.storage ? 'present' : 'absent'}, drizzle=${state.schemas.drizzle ? 'present' : 'absent'}, supabase_migrations=${state.schemas.supabaseMigrations ? 'present' : 'absent'}.`);
+    report(`Public objects: ${state.publicObjects.length ? state.publicObjects.map((object) => `${safeName(object.kind)}:${safeName(object.name)}${object.extensionOwned ? '[extension]' : ''}`).join(', ') : 'none'}.`);
+    report(`Drizzle objects: ${state.drizzleObjects.length ? state.drizzleObjects.map((object) => `${safeName(object.kind)}:${safeName(object.name)}`).join(', ') : 'none'}.`);
+    const automatic = state.supabaseAutomaticRlsFunctions[0];
+    const eventTrigger = state.eventTriggers[0];
+    report(`Automatic RLS: function=${automatic ? `${safeName(automatic.schema)}.${safeName(automatic.name)} owner=${safeName(automatic.owner)} language=${safeName(automatic.language)} result=${safeName(automatic.returnType)} security_definer=${automatic.securityDefiner} strict=${automatic.strict} volatility=${safeName(automatic.volatility)} source_length=${automatic.sourceLength} source_md5=${safeDigest(automatic.sourceMd5)}` : 'absent'}; event_trigger=${eventTrigger ? `${safeName(eventTrigger.name)} owner=${safeName(eventTrigger.owner)} enabled=${safeName(eventTrigger.enabled)} event=${safeName(eventTrigger.event)} tags=${(eventTrigger.tags ?? []).map(safeName).join('|')} handler=${safeName(eventTrigger.handlerSchema)}.${safeName(eventTrigger.handlerName)}()` : 'absent'}.`);
+    report(`API roles: ${state.dataApiRoles.map(safeName).join(', ') || 'none'}.`);
+    for (const role of state.dataApiRoleAudit ?? []) {
+      report(`API role ${safeName(role.role)}: inherits_owner=${role.inheritsRuntimeOwner}; superuser=${role.superuser}; bypass_rls=${role.bypassRls}; public_usage=${role.publicUsage}; public_create=${role.publicCreate}; auth_usage=${role.authUsage}; auth_create=${role.authCreate}; storage_usage=${role.storageUsage}; storage_create=${role.storageCreate}; drizzle_usage=${role.drizzleUsage}; drizzle_create=${role.drizzleCreate}; table_privileges=${role.applicationTablePrivileges.map(safeName).join('|') || 'none'}; sequence_privileges=${role.applicationSequencePrivileges.map(safeName).join('|') || 'none'}.`);
+    }
+    report(`Application tables: ${state.applicationTables.map(safeName).join(', ') || 'none'}; RLS tables=${state.applicationRlsTables.map(safeName).join(', ') || 'none'}; policies=${state.applicationPolicies.map(safeName).join(', ') || 'none'}.`);
+    report(`Drizzle history: ${state.migrationHistory.length ? state.migrationHistory.map((row) => `${row.createdAt}:${safeName(row.hash)}`).join(', ') : 'absent'}.`);
+    report(`Supabase CLI migration history: schema=${state.supabaseMigrationSchemaExists ? 'present' : 'absent'}, records=${state.supabaseMigrationRecords}${state.supabaseMigrationEntries?.length ? `, entries=${state.supabaseMigrationEntries.map(safeName).join(',')}` : ''}.`);
+
+    check('required Supabase schemas', () => assertStagingRequiredSchemas(state.schemas));
+    check('database session is read-only', () => { if (state.identity.transactionReadOnly !== true) throw new Error('read-only session setting absent'); });
+    check('exact automatic-RLS function and event trigger', () => assertSupabaseAutomaticRlsConfiguration(state));
+    check('required Data API roles', () => assertStagingDataApiRoles(state.dataApiRoles));
+    check('Data API privilege isolation from runtime/migration owner and application tables', () => assertStagingDataApiPrivileges(state));
+    check('baseline initialization preflight and migration-history eligibility', () => assertStagingInitializationState(state, [
+      ...dependencies.expectedBaselineTables,
+      ...dependencies.expectedBaselineTables.map((table) => `${table}_id_seq`),
+      ...dependencies.expectedBaselineTables.map((table) => `${table}_pkey`),
+      ...dependencies.expectedBaselineIndexes,
+      ...dependencies.expectedBaselineConstraints,
+    ]));
+    report(failures === 0
+      ? 'ELIGIBLE for guarded baseline initialization only. This read-only command applied no schema changes or migrations.'
+      : 'NOT ELIGIBLE for baseline initialization; no database changes were made. Investigate the failed checks manually.');
+    result = failures === 0 ? 0 : 1;
+  } catch {
+    report(diagnostic('preflight', runtime ? 'CATALOG_CHECK_FAILED' : 'CONNECTION_FAILED'));
+    result = 1;
+  } finally {
+    if (runtime) {
+      try {
+        await runtime.close();
+      } catch {
+        report(diagnostic('preflight', 'CONNECTION_CLOSE_FAILED'));
+        failures += 1;
+        result = 1;
+      }
+    }
+  }
+  return result;
+}
+
 /**
  * Runs already-resolved database operations. Production CLIs call this only
  * through runSupabaseStagingCommand, which validates all target safeguards
@@ -154,8 +279,11 @@ export async function runSupabaseStagingOperations(
     stage = 'IDENTITY_FAILED';
     const before = await runtime.inspect();
     assertStagingIdentity(before.identity, settings);
+    assertSupabaseAutomaticRlsConfiguration(before, settings.automaticRlsRequired);
     stage = 'DATA_API_ROLES_FAILED';
     assertStagingDataApiRoles(before.dataApiRoles);
+    assertStagingRequiredSchemas(before.schemas);
+    assertStagingDataApiPrivileges(before);
     stage = 'PREFLIGHT_FAILED';
     if (mode === 'initialize') {
       assertStagingInitializationState(before, [
@@ -164,18 +292,20 @@ export async function runSupabaseStagingOperations(
         ...dependencies.expectedBaselineTables.map((table) => `${table}_pkey`),
         ...dependencies.expectedBaselineIndexes,
         ...dependencies.expectedBaselineConstraints,
-      ]);
+      ], settings.automaticRlsRequired);
       stage = 'BASELINE_FAILED';
       await runtime.applyBaseline();
       stage = 'BASELINE_VERIFY_FAILED';
       const after = await runtime.inspect();
       assertStagingIdentity(after.identity, settings);
+      assertSupabaseAutomaticRlsUnchanged(before, after, settings.automaticRlsRequired);
       assertStagingBaselineState(after, {
         baseline: dependencies.baseline,
         baselineApplicationTables: dependencies.expectedBaselineTables,
         baselineColumns: dependencies.expectedBaselineColumns,
         baselineIndexes: dependencies.expectedBaselineIndexes,
         baselineConstraints: dependencies.expectedBaselineConstraints,
+        automaticRlsRequired: settings.automaticRlsRequired,
       });
       if (!after.drizzleSchemaExists || after.drizzleRelations.length !== 2
         || !after.drizzleRelations.includes('__drizzle_migrations')
@@ -188,13 +318,14 @@ export async function runSupabaseStagingOperations(
         expectedBaselineIndexes: dependencies.expectedBaselineIndexes,
         expectedBaselineConstraints: dependencies.expectedBaselineConstraints,
         contactExpected: false,
-        rlsExpected: false,
+        rlsExpected: settings.automaticRlsRequired,
       });
     } else {
       if (before.supabaseMigrationSchemaExists || before.supabaseMigrationRecords !== 0) {
         throw new Error('Supabase CLI migration history exists; reconcile migration systems before continuing.');
       }
       assertStagingMigrationHistory(before.migrationHistory, dependencies.baseline, dependencies.forward, true);
+      assertSupabaseAutomaticRlsConfiguration(before, settings.automaticRlsRequired);
       if (!before.drizzleSchemaExists || before.drizzleRelations.length !== 2
         || !before.drizzleRelations.includes('__drizzle_migrations')
         || !before.drizzleRelations.includes('__drizzle_migrations_id_seq')) {
@@ -207,7 +338,7 @@ export async function runSupabaseStagingOperations(
         expectedBaselineIndexes: dependencies.expectedBaselineIndexes,
         expectedBaselineConstraints: dependencies.expectedBaselineConstraints,
         contactExpected: appliedForwardCount > 0,
-        rlsExpected: appliedForwardCount >= 2,
+        rlsExpected: settings.automaticRlsRequired || appliedForwardCount >= 2,
         current: {
           expectedCurrentTables: dependencies.expectedCurrentTables,
           expectedCurrentColumns: dependencies.expectedCurrentColumns,
@@ -220,6 +351,7 @@ export async function runSupabaseStagingOperations(
       stage = 'FORWARD_VERIFY_FAILED';
       const after = await runtime.inspect();
       assertStagingIdentity(after.identity, settings);
+      assertSupabaseAutomaticRlsUnchanged(before, after, settings.automaticRlsRequired);
       if (after.supabaseMigrationSchemaExists || after.supabaseMigrationRecords !== 0) {
         throw new Error('Supabase CLI migration history appeared during migration.');
       }
@@ -235,7 +367,7 @@ export async function runSupabaseStagingOperations(
         expectedBaselineIndexes: dependencies.expectedBaselineIndexes,
         expectedBaselineConstraints: dependencies.expectedBaselineConstraints,
         contactExpected: true,
-        rlsExpected: true,
+        rlsExpected: settings.automaticRlsRequired || dependencies.forward.length >= 2,
         current: {
           expectedCurrentTables: dependencies.expectedCurrentTables,
           expectedCurrentColumns: dependencies.expectedCurrentColumns,
@@ -349,22 +481,25 @@ export async function loadStagingRunnerDependencies(
   };
 }
 
-export async function openPostgresRuntime(settings: StagingDatabaseSettings): Promise<StagingRuntime> {
+export async function openPostgresRuntime(settings: StagingDatabaseSettings, readOnly = false): Promise<StagingRuntime> {
   const [{ Pool }, { drizzle }] = await Promise.all([
     import('pg'),
     import('drizzle-orm/node-postgres'),
   ]);
+  const ssl = settings.ssl
+    ? await loadVerifiedSupabaseStagingSslOptions(settings.caFilePath)
+    : false;
   const pool = new Pool({
     host: settings.host,
     port: settings.port,
     database: settings.database,
     user: settings.user,
     password: settings.password,
-    ssl: settings.ssl,
+    ssl,
     max: 1,
     connectionTimeoutMillis: 5000,
     statement_timeout: 8000,
-    options: '-c search_path=public',
+    options: readOnly ? '-c search_path=public -c default_transaction_read_only=on' : '-c search_path=public',
     application_name: 'flyrc-supabase-staging-schema-task',
   });
   try {
@@ -376,13 +511,14 @@ export async function openPostgresRuntime(settings: StagingDatabaseSettings): Pr
 
   const inspect = async (): Promise<StagingCatalogState> => {
     const identityResult = await pool.query<{
-      database: string; user: string; current_schema: string; search_path: string; server_port: number;
-    }>(`SELECT current_database() AS database, current_user AS user, current_schema() AS current_schema,
-               current_setting('search_path') AS search_path, inet_server_port() AS server_port`);
+      database: string; login_user: string; user: string; current_schema: string; search_path: string; server_port: number; transaction_read_only: boolean;
+    }>(`SELECT current_database() AS database, session_user AS login_user, current_user AS user, current_schema() AS current_schema,
+               current_setting('search_path') AS search_path, inet_server_port() AS server_port,
+               current_setting('transaction_read_only')::boolean AS transaction_read_only`);
     const identityRow = identityResult.rows[0];
     if (!identityRow) throw new Error('identity check failed');
 
-    const publicObjectResult = await pool.query<{ name: string; kind: string; extensionOwned: boolean }>(`
+    const objectInventoryQuery = `
       SELECT c.relname AS name, 'relation' AS kind,
         EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e') AS "extensionOwned"
       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -396,7 +532,8 @@ export async function openPostgresRuntime(settings: StagingDatabaseSettings): Pr
       SELECT t.typname AS name, 'type' AS kind,
         EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e') AS "extensionOwned"
       FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
-      WHERE n.nspname = 'public' AND t.typrelid = 0 AND t.typtype IN ('c','d','e','r','m')
+      WHERE n.nspname = 'public' AND t.typtype <> 'p'
+        AND NOT (t.typelem <> 0 AND t.typcategory = 'A')
       UNION ALL
       SELECT o.oprname AS name, 'operator' AS kind,
         EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_operator'::regclass AND d.objid = o.oid AND d.deptype = 'e') AS "extensionOwned"
@@ -405,6 +542,10 @@ export async function openPostgresRuntime(settings: StagingDatabaseSettings): Pr
       SELECT o.opcname AS name, 'operator_class' AS kind,
         EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_opclass'::regclass AND d.objid = o.oid AND d.deptype = 'e') AS "extensionOwned"
       FROM pg_opclass o JOIN pg_namespace n ON n.oid = o.opcnamespace WHERE n.nspname = 'public'
+      UNION ALL
+      SELECT o.opfname AS name, 'operator_family' AS kind,
+        EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_opfamily'::regclass AND d.objid = o.oid AND d.deptype = 'e') AS "extensionOwned"
+      FROM pg_opfamily o JOIN pg_namespace n ON n.oid = o.opfnamespace WHERE n.nspname = 'public'
       UNION ALL
       SELECT c.collname AS name, 'collation' AS kind,
         EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_collation'::regclass AND d.objid = c.oid AND d.deptype = 'e') AS "extensionOwned"
@@ -429,8 +570,41 @@ export async function openPostgresRuntime(settings: StagingDatabaseSettings): Pr
       SELECT t.tmplname AS name, 'text_search_template' AS kind,
         EXISTS (SELECT 1 FROM pg_depend dep WHERE dep.classid = 'pg_ts_template'::regclass AND dep.objid = t.oid AND dep.deptype = 'e') AS "extensionOwned"
       FROM pg_ts_template t JOIN pg_namespace n ON n.oid = t.tmplnamespace WHERE n.nspname = 'public'
+      UNION ALL
+      SELECT s.stxname AS name, 'statistics' AS kind,
+        EXISTS (SELECT 1 FROM pg_depend dep WHERE dep.classid = 'pg_statistic_ext'::regclass AND dep.objid = s.oid AND dep.deptype = 'e') AS "extensionOwned"
+      FROM pg_statistic_ext s JOIN pg_namespace n ON n.oid = s.stxnamespace WHERE n.nspname = 'public'
+    `;
+    const publicObjectResult = await pool.query<{ name: string; kind: string; extensionOwned: boolean }>(objectInventoryQuery);
+    const drizzleObjectResult = await pool.query<{ name: string; kind: string; extensionOwned: boolean }>(
+      objectInventoryQuery.replaceAll("n.nspname = 'public'", "n.nspname = 'drizzle'"),
+    );
+    const automaticRlsFunctionResult = await pool.query<StagingCatalogState['supabaseAutomaticRlsFunctions'][number]>(`
+      SELECT n.nspname AS schema, p.proname AS name, p.pronargs::integer AS "argumentCount",
+             pg_get_function_identity_arguments(p.oid) AS "identityArguments",
+             pg_get_userbyid(p.proowner) AS owner, l.lanname AS language,
+             pg_get_function_result(p.oid) AS "returnType", p.prosecdef AS "securityDefiner",
+             p.proisstrict AS strict, p.provolatile AS volatility, p.proconfig AS configuration,
+             length(p.prosrc)::integer AS "sourceLength", md5(p.prosrc) AS "sourceMd5"
+      FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+      JOIN pg_language l ON l.oid = p.prolang
+      WHERE n.nspname = 'public' AND p.proname = 'rls_auto_enable'
+    `);
+    const eventTriggerResult = await pool.query<StagingCatalogState['eventTriggers'][number]>(`
+      SELECT e.evtname AS name, pg_get_userbyid(e.evtowner) AS owner, e.evtenabled AS enabled,
+             e.evtevent AS event, e.evttags AS tags, hn.nspname AS "handlerSchema",
+             hp.proname AS "handlerName", hp.pronargs::integer AS "handlerArgumentCount"
+      FROM pg_event_trigger e
+      JOIN pg_proc hp ON hp.oid = e.evtfoid
+      JOIN pg_namespace hn ON hn.oid = hp.pronamespace
+      ORDER BY e.evtname
     `);
     const drizzleSchema = await pool.query<{ exists: boolean }>(`SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = 'drizzle') AS exists`);
+    const schemaRows = await pool.query<{ schema_name: string }>(`
+      SELECT nspname AS schema_name FROM pg_namespace
+      WHERE nspname = ANY($1::text[]) ORDER BY nspname
+    `, [['public', 'auth', 'storage', 'drizzle', 'supabase_migrations']]);
     const drizzleRelations = await pool.query<{ relname: string }>(`
       SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname = 'drizzle' AND c.relkind IN ('r','p','v','m','S','f') ORDER BY c.relname
@@ -443,12 +617,51 @@ export async function openPostgresRuntime(settings: StagingDatabaseSettings): Pr
     }
     const supabaseSchema = await pool.query<{ exists: boolean }>(`SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = 'supabase_migrations') AS exists`);
     const dataApiRoles = await pool.query<{ rolname: string }>(`SELECT rolname FROM pg_roles WHERE rolname IN ('anon', 'authenticated') ORDER BY rolname`);
+    const dataApiRoleAudit = await pool.query<NonNullable<StagingCatalogState['dataApiRoleAudit']>[number]>(`
+      SELECT r.rolname AS role, r.rolsuper AS superuser, r.rolbypassrls AS "bypassRls",
+             pg_has_role(r.rolname, $1, 'MEMBER') AS "inheritsRuntimeOwner",
+             has_schema_privilege(r.rolname, 'public', 'USAGE') AS "publicUsage",
+             has_schema_privilege(r.rolname, 'public', 'CREATE') AS "publicCreate",
+             CASE WHEN EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth') THEN has_schema_privilege(r.rolname, 'auth', 'USAGE') ELSE false END AS "authUsage",
+             CASE WHEN EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth') THEN has_schema_privilege(r.rolname, 'auth', 'CREATE') ELSE false END AS "authCreate",
+             CASE WHEN EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'storage') THEN has_schema_privilege(r.rolname, 'storage', 'USAGE') ELSE false END AS "storageUsage",
+             CASE WHEN EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'storage') THEN has_schema_privilege(r.rolname, 'storage', 'CREATE') ELSE false END AS "storageCreate",
+             CASE WHEN EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'drizzle')
+               THEN has_schema_privilege(r.rolname, 'drizzle', 'USAGE') ELSE false END AS "drizzleUsage",
+             CASE WHEN EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'drizzle')
+               THEN has_schema_privilege(r.rolname, 'drizzle', 'CREATE') ELSE false END AS "drizzleCreate",
+             ARRAY(
+               SELECT format('%s:%s', app.table_name, privilege.privilege)
+               FROM unnest($2::text[]) AS app(table_name)
+               CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']::text[]) AS privilege(privilege)
+               WHERE to_regclass(format('public.%I', app.table_name)) IS NOT NULL
+                 AND (has_table_privilege(r.rolname, format('public.%I', app.table_name), privilege.privilege)
+                   OR (privilege.privilege IN ('SELECT','INSERT','UPDATE','REFERENCES')
+                     AND has_any_column_privilege(r.rolname, format('public.%I', app.table_name), privilege.privilege)))
+               ORDER BY app.table_name, privilege.privilege
+             ) AS "applicationTablePrivileges",
+             ARRAY(
+               SELECT format('%s:%s', app.table_name || '_id_seq', privilege.privilege)
+               FROM unnest($2::text[]) AS app(table_name)
+               CROSS JOIN unnest(ARRAY['USAGE','SELECT','UPDATE']::text[]) AS privilege(privilege)
+               WHERE to_regclass(format('public.%I', app.table_name || '_id_seq')) IS NOT NULL
+                 AND has_sequence_privilege(r.rolname, format('public.%I', app.table_name || '_id_seq'), privilege.privilege)
+               ORDER BY app.table_name, privilege.privilege
+             ) AS "applicationSequencePrivileges"
+      FROM pg_roles r WHERE r.rolname IN ('anon', 'authenticated') ORDER BY r.rolname
+    `, [settings.runtimeUser, declaredApplicationTableNames]);
     let supabaseMigrationRecords = 0;
+    let supabaseMigrationEntries: string[] = [];
     if (supabaseSchema.rows[0]?.exists) {
       const tableExists = await pool.query<{ exists: boolean }>(`SELECT to_regclass('supabase_migrations.schema_migrations') IS NOT NULL AS exists`);
       if (tableExists.rows[0]?.exists) {
         const count = await pool.query<{ count: string }>(`SELECT count(*)::text AS count FROM supabase_migrations.schema_migrations`);
         supabaseMigrationRecords = Number(count.rows[0]?.count ?? '0');
+        const entries = await pool.query<{ entry: string }>(`
+          SELECT COALESCE(to_jsonb(m)->>'version', to_jsonb(m)->>'name', to_jsonb(m)->>'id', '<unidentified>') AS entry
+          FROM supabase_migrations.schema_migrations m ORDER BY 1
+        `);
+        supabaseMigrationEntries = entries.rows.map((row) => row.entry);
       }
     }
     const tableRows = await pool.query<{ tablename: string }>(`
@@ -501,17 +714,30 @@ export async function openPostgresRuntime(settings: StagingDatabaseSettings): Pr
     return {
       identity: {
         database: identityRow.database,
+        loginUser: identityRow.login_user,
         user: identityRow.user,
         currentSchema: identityRow.current_schema,
         searchPath: identityRow.search_path,
         serverPort: Number(identityRow.server_port),
+        transactionReadOnly: identityRow.transaction_read_only,
+      },
+      schemas: {
+        public: schemaRows.rows.some((row) => row.schema_name === 'public'),
+        auth: schemaRows.rows.some((row) => row.schema_name === 'auth'),
+        storage: schemaRows.rows.some((row) => row.schema_name === 'storage'),
+        drizzle: schemaRows.rows.some((row) => row.schema_name === 'drizzle'),
+        supabaseMigrations: schemaRows.rows.some((row) => row.schema_name === 'supabase_migrations'),
       },
       publicObjects: publicObjectResult.rows,
+      drizzleObjects: drizzleObjectResult.rows,
+      supabaseAutomaticRlsFunctions: automaticRlsFunctionResult.rows,
+      eventTriggers: eventTriggerResult.rows,
       drizzleSchemaExists: Boolean(drizzleSchema.rows[0]?.exists),
       drizzleRelations: drizzleRelations.rows.map((row) => row.relname),
       migrationHistory,
       supabaseMigrationSchemaExists: Boolean(supabaseSchema.rows[0]?.exists),
       supabaseMigrationRecords,
+      supabaseMigrationEntries,
       dataApiRoles: dataApiRoles.rows.map((row) => row.rolname),
       applicationTables: tableRows.rows.map((row) => row.tablename),
       applicationColumns: columns,
@@ -545,6 +771,24 @@ export async function openPostgresRuntime(settings: StagingDatabaseSettings): Pr
     },
     close: async () => { await pool.end(); },
   };
+}
+
+export async function openPostgresReadOnlyRuntime(settings: StagingDatabaseSettings): Promise<StagingPreflightRuntime> {
+  const runtime = await openPostgresRuntime(settings, true);
+  return { inspect: runtime.inspect, close: runtime.close };
+}
+
+export async function runPreflightCli(args = process.argv.slice(2), env = process.env) {
+  try {
+    const dependencies = await loadStagingRunnerDependencies(openPostgresRuntime);
+    return await runSupabaseStagingPreflight(args, env, {
+      ...dependencies,
+      open: openPostgresReadOnlyRuntime,
+    }, console.log);
+  } catch {
+    console.log(diagnostic('preflight', 'STATIC_CONFIGURATION_INVALID'));
+    return 2;
+  }
 }
 
 export async function runCli(mode: StagingMode, args = process.argv.slice(2), env = process.env) {

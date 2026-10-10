@@ -1,7 +1,9 @@
 import { isIP } from 'node:net';
+import { isAbsolute } from 'node:path';
 
 const confirmation = 'I_CONFIRM_NEW_SUPABASE_STAGING_SCHEMA';
 const migrationConfirmation = 'I_CONFIRM_SUPABASE_STAGING_MIGRATION';
+const noProductionConfirmation = 'I_CONFIRM_NO_PRODUCTION_SUPABASE_PROJECT';
 
 export type StagingDatabaseSettings = {
   host: string;
@@ -11,21 +13,44 @@ export type StagingDatabaseSettings = {
   effectiveUser: string;
   runtimeUser: string;
   password: string;
+  caFilePath?: string;
   projectRef: string;
+  connectionMode: 'direct' | 'shared-pooler';
   schema: 'public';
   ssl: boolean;
   fingerprint: string;
+  /** Required for guarded Supabase CLI targets; local injected tests may explicitly model its absence. */
+  automaticRlsRequired: boolean;
 };
+export type StagingIdentityProbeSettings = Omit<StagingDatabaseSettings, 'effectiveUser' | 'runtimeUser'>;
 
 export type StagingCatalogState = {
-  identity: { database: string; user: string; currentSchema: string; searchPath: string; serverPort: number };
+  identity: { database: string; loginUser: string; user: string; currentSchema: string; searchPath: string; serverPort: number; transactionReadOnly?: boolean };
+  schemas: { public: boolean; auth: boolean; storage: boolean; drizzle: boolean; supabaseMigrations: boolean };
   publicObjects: Array<{ name: string; kind: string; extensionOwned: boolean }>;
+  drizzleObjects: Array<{ name: string; kind: string; extensionOwned: boolean }>;
+  supabaseAutomaticRlsFunctions: Array<{
+    schema: string; name: string; argumentCount: number; identityArguments: string; owner: string;
+    language: string; returnType: string; securityDefiner: boolean; strict: boolean; volatility: string;
+    configuration: string[] | null; sourceLength: number; sourceMd5: string;
+  }>;
+  eventTriggers: Array<{
+    name: string; owner: string; enabled: string; event: string; tags: string[] | null;
+    handlerSchema: string; handlerName: string; handlerArgumentCount: number;
+  }>;
   drizzleSchemaExists: boolean;
   drizzleRelations: string[];
   migrationHistory: Array<{ hash: string; createdAt: number }>;
   supabaseMigrationSchemaExists: boolean;
   supabaseMigrationRecords: number;
+  supabaseMigrationEntries?: string[];
   dataApiRoles: string[];
+  dataApiRoleAudit?: Array<{
+    role: string; superuser: boolean; bypassRls: boolean; inheritsRuntimeOwner: boolean;
+    publicUsage: boolean; publicCreate: boolean; authUsage: boolean; authCreate: boolean;
+    storageUsage: boolean; storageCreate: boolean; drizzleUsage: boolean; drizzleCreate: boolean;
+    applicationTablePrivileges: string[]; applicationSequencePrivileges: string[];
+  }>;
   applicationTables: string[];
   applicationColumns: Record<string, Array<{ name: string; type: string; notNull: boolean; hasDefault: boolean }>>;
   applicationIndexes: string[];
@@ -39,6 +64,76 @@ export type StagingCatalogState = {
 
 export type MigrationJournalEntry = { tag: string; when: number; hash: string };
 export type ExpectedStagingColumn = { name: string; type: string; notNull: boolean; hasDefault: boolean };
+
+const expectedAutomaticRlsFunction = {
+  schema: 'public', name: 'rls_auto_enable', argumentCount: 0, identityArguments: '', owner: 'postgres',
+  language: 'plpgsql', returnType: 'event_trigger', securityDefiner: true, strict: false, volatility: 'v',
+  configuration: ['search_path=pg_catalog'], sourceLength: 1055, sourceMd5: 'c44fb229ea8a6b0afd04a0a33261c16c',
+} as const;
+const expectedAutomaticRlsEventTrigger = {
+  name: 'ensure_rls', owner: 'postgres', enabled: 'O', event: 'ddl_command_end',
+  tags: ['CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO'],
+  handlerSchema: 'public', handlerName: 'rls_auto_enable', handlerArgumentCount: 0,
+} as const;
+
+function exactAutomaticRlsConfiguration(state: StagingCatalogState): boolean {
+  if (state.supabaseAutomaticRlsFunctions.length !== 1 || state.eventTriggers.length !== 1) return false;
+  const fn = state.supabaseAutomaticRlsFunctions[0]!;
+  const trigger = state.eventTriggers[0]!;
+  const config = fn.configuration ? [...fn.configuration].sort() : null;
+  const tags = trigger.tags ? [...trigger.tags].sort() : null;
+  return fn.schema === expectedAutomaticRlsFunction.schema
+    && fn.name === expectedAutomaticRlsFunction.name
+    && fn.argumentCount === expectedAutomaticRlsFunction.argumentCount
+    && fn.identityArguments === expectedAutomaticRlsFunction.identityArguments
+    && fn.owner === expectedAutomaticRlsFunction.owner
+    && fn.language === expectedAutomaticRlsFunction.language
+    && fn.returnType === expectedAutomaticRlsFunction.returnType
+    && fn.securityDefiner === expectedAutomaticRlsFunction.securityDefiner
+    && fn.strict === expectedAutomaticRlsFunction.strict
+    && fn.volatility === expectedAutomaticRlsFunction.volatility
+    && JSON.stringify(config) === JSON.stringify([...expectedAutomaticRlsFunction.configuration].sort())
+    && fn.sourceLength === expectedAutomaticRlsFunction.sourceLength
+    && fn.sourceMd5 === expectedAutomaticRlsFunction.sourceMd5
+    && trigger.name === expectedAutomaticRlsEventTrigger.name
+    && trigger.owner === expectedAutomaticRlsEventTrigger.owner
+    && trigger.enabled === expectedAutomaticRlsEventTrigger.enabled
+    && trigger.event === expectedAutomaticRlsEventTrigger.event
+    && JSON.stringify(tags) === JSON.stringify([...expectedAutomaticRlsEventTrigger.tags].sort())
+    && trigger.handlerSchema === expectedAutomaticRlsEventTrigger.handlerSchema
+    && trigger.handlerName === expectedAutomaticRlsEventTrigger.handlerName
+    && trigger.handlerArgumentCount === expectedAutomaticRlsEventTrigger.handlerArgumentCount;
+}
+
+/** Requires the exact Supabase-created automatic-RLS function and its enabled event trigger. */
+export function assertSupabaseAutomaticRlsConfiguration(state: StagingCatalogState, required = true): void {
+  if (!required && state.supabaseAutomaticRlsFunctions.length === 0 && state.eventTriggers.length === 0) return;
+  if (!exactAutomaticRlsConfiguration(state)) {
+    throw new Error('Supabase automatic-RLS function or event-trigger metadata is unexpected; manual review is required.');
+  }
+}
+
+export function assertSupabaseAutomaticRlsUnchanged(before: StagingCatalogState, after: StagingCatalogState, required = true): void {
+  assertSupabaseAutomaticRlsConfiguration(before, required);
+  assertSupabaseAutomaticRlsConfiguration(after, required);
+  const canonical = (state: StagingCatalogState) => JSON.stringify({
+    functions: state.supabaseAutomaticRlsFunctions.map((fn) => ({ ...fn, configuration: fn.configuration ? [...fn.configuration].sort() : null }))
+      .sort((a, b) => `${a.schema}.${a.name}.${a.identityArguments}`.localeCompare(`${b.schema}.${b.name}.${b.identityArguments}`)),
+    triggers: state.eventTriggers.map((trigger) => ({ ...trigger, tags: trigger.tags ? [...trigger.tags].sort() : null }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+  });
+  if (canonical(before) !== canonical(after)) {
+    throw new Error('Supabase automatic-RLS function or event trigger changed during the operation.');
+  }
+}
+
+export function isApprovedSupabaseAutomaticRlsRoutine(
+  state: StagingCatalogState,
+  object: StagingCatalogState['publicObjects'][number],
+): boolean {
+  return object.kind === 'routine' && object.name === expectedAutomaticRlsFunction.name
+    && !object.extensionOwned && exactAutomaticRlsConfiguration(state);
+}
 
 export function normalizeStagingSqlType(type: string): string {
   return type.toLowerCase().replace(/\s*,\s*/g, ',').replace(/\s+/g, ' ').trim();
@@ -117,23 +212,62 @@ function configuredSqlTarget(env: Record<string, string | undefined>) {
 }
 
 export function resolveSupabaseStagingSettings(
-  mode: 'initialize' | 'migrate',
+  mode: 'probe',
   args: string[],
   env: Record<string, string | undefined>,
-): StagingDatabaseSettings {
-  const expectedArg = mode === 'initialize' ? '--confirm-staging-initialize' : '--confirm-staging-migrate';
-  const expectedConfirmation = mode === 'initialize' ? confirmation : migrationConfirmation;
-  const confirmationEnv = mode === 'initialize'
-    ? 'SUPABASE_STAGING_INITIALIZATION_CONFIRMATION'
-    : 'SUPABASE_STAGING_MIGRATION_CONFIRMATION';
+): StagingIdentityProbeSettings;
+export function resolveSupabaseStagingSettings(
+  mode: 'initialize' | 'migrate' | 'check',
+  args: string[],
+  env: Record<string, string | undefined>,
+): StagingDatabaseSettings;
+export function resolveSupabaseStagingSettings(
+  mode: 'initialize' | 'migrate' | 'check' | 'probe',
+  args: string[],
+  env: Record<string, string | undefined>,
+): StagingDatabaseSettings | StagingIdentityProbeSettings {
+  const expectedArg = mode === 'initialize' ? '--confirm-staging-initialize'
+    : mode === 'migrate' ? '--confirm-staging-migrate'
+      : mode === 'check' ? '--confirm-staging-preflight' : '--confirm-staging-identity-probe';
+  const expectedConfirmation = mode === 'initialize' ? confirmation
+    : mode === 'migrate' ? migrationConfirmation
+      : mode === 'check' ? 'I_CONFIRM_READ_ONLY_SUPABASE_STAGING_PREFLIGHT' : 'I_CONFIRM_READ_ONLY_SUPABASE_STAGING_IDENTITY_PROBE';
+  const confirmationEnv = mode === 'initialize' ? 'SUPABASE_STAGING_INITIALIZATION_CONFIRMATION'
+    : mode === 'migrate' ? 'SUPABASE_STAGING_MIGRATION_CONFIRMATION'
+      : mode === 'check' ? 'SUPABASE_STAGING_PREFLIGHT_CONFIRMATION' : 'SUPABASE_STAGING_PROBE_CONFIRMATION';
   if (args.length !== 1 || args[0] !== expectedArg) throw new Error(`Pass ${expectedArg} exactly once and no other arguments.`);
   if (env.SUPABASE_STAGING_ENABLED !== 'true') throw new Error('SUPABASE_STAGING_ENABLED must equal true.');
   if (env[confirmationEnv] !== expectedConfirmation) throw new Error(`Explicit ${mode} confirmation is required.`);
-  if (!validProjectRef(env.SUPABASE_STAGING_PROJECT_REF) || !validProjectRef(env.SUPABASE_PRODUCTION_PROJECT_REF)) {
-    throw new Error('Valid staging and production project references are required.');
+  const noProductionSetting = env.SUPABASE_NO_PRODUCTION_PROJECT;
+  const noProductionConfirmationSetting = env.SUPABASE_NO_PRODUCTION_PROJECT_CONFIRMATION;
+  const noProductionMode = noProductionSetting === 'true';
+  if (noProductionSetting !== undefined && noProductionSetting !== '' && !noProductionMode) {
+    throw new Error('SUPABASE_NO_PRODUCTION_PROJECT must be unset or exactly true.');
   }
-  if (env.SUPABASE_STAGING_PROJECT_REF === env.SUPABASE_PRODUCTION_PROJECT_REF) {
-    throw new Error('Staging and production project references must be different.');
+  if (noProductionMode) {
+    const productionRef = env.SUPABASE_PRODUCTION_PROJECT_REF;
+    if (productionRef !== undefined && productionRef !== '') {
+      throw new Error('SUPABASE_PRODUCTION_PROJECT_REF must be unset when no-production mode is enabled.');
+    }
+    if (noProductionConfirmationSetting !== noProductionConfirmation) {
+      throw new Error('Explicit no-production-project confirmation is required.');
+    }
+  } else {
+    if (noProductionConfirmationSetting !== undefined && noProductionConfirmationSetting !== '') {
+      throw new Error('No-production confirmation cannot be used unless no-production mode is enabled.');
+    }
+    if (!validProjectRef(env.SUPABASE_PRODUCTION_PROJECT_REF)) {
+      throw new Error('A valid Production project reference is required unless explicit no-production mode is enabled.');
+    }
+    if (env.SUPABASE_STAGING_PROJECT_REF === env.SUPABASE_PRODUCTION_PROJECT_REF) {
+      throw new Error('Staging and Production project references must be different.');
+    }
+  }
+  if (!validProjectRef(env.SUPABASE_STAGING_PROJECT_REF)) {
+    throw new Error('A valid staging project reference is required.');
+  }
+  if (mode === 'probe' && !noProductionMode) {
+    throw new Error('The identity probe requires explicit no-production-project mode.');
   }
   if (env.SUPABASE_STAGING_SCHEMA !== 'public') throw new Error('SUPABASE_STAGING_SCHEMA must equal public.');
 
@@ -144,10 +278,17 @@ export function resolveSupabaseStagingSettings(
   const expectedPort = parsePort(env.SUPABASE_STAGING_DATABASE_PORT?.trim());
   const expectedDatabase = env.SUPABASE_STAGING_DATABASE_NAME?.trim();
   const expectedUser = env.SUPABASE_STAGING_DATABASE_USER?.trim();
+  const caFilePath = env.SUPABASE_STAGING_DATABASE_CA_FILE?.trim();
   const effectiveUser = env.SUPABASE_STAGING_DATABASE_EFFECTIVE_USER?.trim();
   const runtimeUser = env.SUPABASE_STAGING_RUNTIME_DATABASE_USER?.trim();
-  if (!expectedDatabase || !expectedUser || !effectiveUser || !runtimeUser) throw new Error('Expected staging database name, login user, effective database user, and runtime database user are required.');
-  if (runtimeUser !== effectiveUser) throw new Error('The staging runtime database role must equal the migration owner role unless separately reviewed.');
+  if (!expectedDatabase || !expectedUser) throw new Error('Expected staging database name and login user are required.');
+  if (!caFilePath || !isAbsolute(caFilePath)) {
+    throw new Error('SUPABASE_STAGING_DATABASE_CA_FILE must name an absolute path to the official staging database CA certificate.');
+  }
+  if (mode !== 'probe') {
+    if (!effectiveUser || !runtimeUser) throw new Error('Expected effective and runtime database users are required.');
+    if (runtimeUser !== effectiveUser) throw new Error('The staging runtime database role must equal the migration owner role unless separately reviewed.');
+  }
   if (parsed.host !== expectedHost || parsed.port !== expectedPort || parsed.database !== expectedDatabase || parsed.user !== expectedUser) {
     throw new Error('Staging connection target does not match its independent expected identity.');
   }
@@ -178,15 +319,18 @@ export function resolveSupabaseStagingSettings(
     throw new Error('Staging target must not match a runtime, generic migration, or fresh-initializer database target.');
   }
 
-  return {
+  const commonSettings: StagingIdentityProbeSettings = {
     ...parsed,
-    effectiveUser,
-    runtimeUser,
     projectRef,
+    connectionMode: direct ? 'direct' : 'shared-pooler',
     schema: 'public',
     ssl: true,
+    caFilePath,
     fingerprint,
+    automaticRlsRequired: true,
   };
+  if (mode === 'probe') return commonSettings;
+  return { ...commonSettings, effectiveUser: effectiveUser!, runtimeUser: runtimeUser! };
 }
 
 export function assertStagingDataApiRoles(roles: string[]): void {
@@ -202,6 +346,9 @@ export function assertStagingIdentity(
   if (
     actual.database !== expected.database
     || actual.user !== expected.effectiveUser
+    || !actual.loginUser
+    || (expected.connectionMode === 'direct' && actual.loginUser !== expected.user)
+    || (expected.connectionMode === 'shared-pooler' && actual.loginUser !== expected.user && actual.loginUser !== expected.effectiveUser)
     || actual.currentSchema !== 'public'
     || actual.searchPath.replaceAll('"', '').split(',').map((part) => part.trim()).join(',') !== 'public'
   ) {
@@ -212,11 +359,27 @@ export function assertStagingIdentity(
   void actual.serverPort;
 }
 
-export function assertStagingInitializationState(state: StagingCatalogState, applicationObjectNames: string[] = []): void {
+export function assertStagingRequiredSchemas(schemas: StagingCatalogState['schemas']): void {
+  if (!schemas.public || !schemas.auth || !schemas.storage) {
+    throw new Error('Expected public, auth, and storage schemas are not all present.');
+  }
+}
+
+export function assertStagingDataApiPrivileges(state: Pick<StagingCatalogState, 'dataApiRoleAudit'>): void {
+  if (state.dataApiRoleAudit?.length !== 2
+    || state.dataApiRoleAudit.some((role) => role.superuser || role.bypassRls || role.inheritsRuntimeOwner
+      || role.publicCreate || role.drizzleCreate || role.applicationTablePrivileges.length > 0
+      || role.authCreate || role.storageCreate || role.applicationSequencePrivileges.length > 0)) {
+    throw new Error('Data API role privileges are not safely isolated from the application owner and business tables.');
+  }
+}
+
+export function assertStagingInitializationState(state: StagingCatalogState, applicationObjectNames: string[] = [], automaticRlsRequired = true): void {
+  assertSupabaseAutomaticRlsConfiguration(state, automaticRlsRequired);
   if (state.identity.currentSchema !== 'public' || state.identity.searchPath.replaceAll('"', '').split(',').map((part) => part.trim()).join(',') !== 'public') {
     throw new Error('The application schema or search path is ambiguous.');
   }
-  const unexpectedPublic = state.publicObjects.filter((object) => !object.extensionOwned);
+  const unexpectedPublic = state.publicObjects.filter((object) => !object.extensionOwned && !isApprovedSupabaseAutomaticRlsRoutine(state, object));
   if (unexpectedPublic.length) throw new Error('The public schema contains non-extension objects; manual review is required.');
   if (state.publicObjects.some((object) => applicationObjectNames.includes(object.name))) {
     throw new Error('A public object conflicts with an application baseline object.');
@@ -235,7 +398,9 @@ export function assertStagingBaselineState(state: StagingCatalogState, expected:
   baselineColumns: Record<string, ExpectedStagingColumn[]>;
   baselineIndexes: string[];
   baselineConstraints: string[];
+  automaticRlsRequired?: boolean;
 }): void {
+  assertSupabaseAutomaticRlsConfiguration(state, expected.automaticRlsRequired ?? true);
   if (state.identity.currentSchema !== 'public' || state.identity.searchPath.replaceAll('"', '').split(',').map((part) => part.trim()).join(',') !== 'public') {
     throw new Error('The application schema or search path is ambiguous.');
   }
