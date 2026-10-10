@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { db } from './src/db/index.ts';
 import { products, brands, categories, users } from './src/db/schema.ts';
 import { eq, and, gte, lte, or, sql, desc, asc } from 'drizzle-orm';
@@ -197,7 +198,14 @@ if (process.env.NODE_ENV === 'production') {
   // Adapt Vite's Connect server to Express's middleware overload explicitly.
   // Passing the Connect server directly is rejected by newer TypeScript/
   // @types/express combinations even though both are compatible at runtime.
-  app.use((req, res, next) => vite.middlewares(req, res, next));
+  app.use((req, res, next) => vite.middlewares(
+    // Express's request/response objects are Node HTTP objects at runtime.
+    // The assertion is limited to this Connect/Express type boundary because
+    // Vite and Express may resolve different @types/node versions.
+    req as unknown as IncomingMessage,
+    res as unknown as ServerResponse,
+    next,
+  ));
   app.get('*', async (req, res, next) => {
     const url = req.originalUrl;
     try {
