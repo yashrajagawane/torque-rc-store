@@ -179,9 +179,10 @@ app.use('/api', (_req, res) => {
 
 // Serve Vite frontend
 if (process.env.NODE_ENV === 'production') {
-  // Vercel serves /public assets at its CDN edge. Standalone Node continues to
-  // serve Vite's dist directory directly.
-  if (process.env.VERCEL !== '1') app.use(express.static(path.join(__dirname, 'dist')));
+  // Vercel packages the generated public tree with the Express function. Serve
+  // it from the function so hashed JS/CSS assets are returned with their real
+  // MIME types; standalone Node continues to serve Vite's dist directory.
+  app.use(express.static(path.join(__dirname, process.env.VERCEL === '1' ? 'public' : 'dist')));
   app.get('*', (req, res) => {
     const indexPath = process.env.VERCEL === '1'
       ? path.join(__dirname, 'public', 'index.html')

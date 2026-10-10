@@ -2,10 +2,9 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "express",
   "buildCommand": "bun run build:vercel",
-  "outputDirectory": "public",
   "functions": {
     "server.ts": {
-      "includeFiles": "public/index.html",
+      "includeFiles": "public/**",
       "maxDuration": 20
     }
   },
