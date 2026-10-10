@@ -5,6 +5,7 @@ const confirmation = 'I_CONFIRM_NEW_SUPABASE_STAGING_SCHEMA';
 const migrationConfirmation = 'I_CONFIRM_SUPABASE_STAGING_MIGRATION';
 const noProductionConfirmation = 'I_CONFIRM_NO_PRODUCTION_SUPABASE_PROJECT';
 export const stagingDefaultPrivilegeConfirmation = 'I_CONFIRM_STAGING_DEFAULT_PRIVILEGE_HARDENING';
+export const stagingDefaultPrivilegeDiagnosticConfirmation = 'I_CONFIRM_READ_ONLY_STAGING_DEFAULT_PRIVILEGE_DIAGNOSTIC';
 
 export type StagingDatabaseSettings = {
   host: string;
@@ -361,22 +362,30 @@ export function resolveSupabaseStagingSettings(
   env: Record<string, string | undefined>,
 ): StagingDatabaseSettings;
 export function resolveSupabaseStagingSettings(
-  mode: 'initialize' | 'migrate' | 'check' | 'probe' | 'prepare-default-privileges',
+  mode: 'check-default-privileges',
+  args: string[],
+  env: Record<string, string | undefined>,
+): StagingDatabaseSettings;
+export function resolveSupabaseStagingSettings(
+  mode: 'initialize' | 'migrate' | 'check' | 'probe' | 'prepare-default-privileges' | 'check-default-privileges',
   args: string[],
   env: Record<string, string | undefined>,
 ): StagingDatabaseSettings | StagingIdentityProbeSettings {
   const expectedArg = mode === 'initialize' ? '--confirm-staging-initialize'
     : mode === 'migrate' ? '--confirm-staging-migrate'
       : mode === 'check' ? '--confirm-staging-preflight'
-        : mode === 'prepare-default-privileges' ? '--confirm-staging-default-privilege-hardening' : '--confirm-staging-identity-probe';
+        : mode === 'prepare-default-privileges' ? '--confirm-staging-default-privilege-hardening'
+          : mode === 'check-default-privileges' ? '--confirm-staging-default-privilege-diagnostic' : '--confirm-staging-identity-probe';
   const expectedConfirmation = mode === 'initialize' ? confirmation
     : mode === 'migrate' ? migrationConfirmation
       : mode === 'check' ? 'I_CONFIRM_READ_ONLY_SUPABASE_STAGING_PREFLIGHT'
-        : mode === 'prepare-default-privileges' ? stagingDefaultPrivilegeConfirmation : 'I_CONFIRM_READ_ONLY_SUPABASE_STAGING_IDENTITY_PROBE';
+        : mode === 'prepare-default-privileges' ? stagingDefaultPrivilegeConfirmation
+          : mode === 'check-default-privileges' ? stagingDefaultPrivilegeDiagnosticConfirmation : 'I_CONFIRM_READ_ONLY_SUPABASE_STAGING_IDENTITY_PROBE';
   const confirmationEnv = mode === 'initialize' ? 'SUPABASE_STAGING_INITIALIZATION_CONFIRMATION'
     : mode === 'migrate' ? 'SUPABASE_STAGING_MIGRATION_CONFIRMATION'
       : mode === 'check' ? 'SUPABASE_STAGING_PREFLIGHT_CONFIRMATION'
-        : mode === 'prepare-default-privileges' ? 'SUPABASE_STAGING_DEFAULT_PRIVILEGE_CONFIRMATION' : 'SUPABASE_STAGING_PROBE_CONFIRMATION';
+        : mode === 'prepare-default-privileges' ? 'SUPABASE_STAGING_DEFAULT_PRIVILEGE_CONFIRMATION'
+          : mode === 'check-default-privileges' ? 'SUPABASE_STAGING_DEFAULT_PRIVILEGE_DIAGNOSTIC_CONFIRMATION' : 'SUPABASE_STAGING_PROBE_CONFIRMATION';
   if (args.length !== 1 || args[0] !== expectedArg) throw new Error(`Pass ${expectedArg} exactly once and no other arguments.`);
   if (env.SUPABASE_STAGING_ENABLED !== 'true') throw new Error('SUPABASE_STAGING_ENABLED must equal true.');
   if (env[confirmationEnv] !== expectedConfirmation) throw new Error(`Explicit ${mode} confirmation is required.`);
@@ -408,7 +417,7 @@ export function resolveSupabaseStagingSettings(
   if (!validProjectRef(env.SUPABASE_STAGING_PROJECT_REF)) {
     throw new Error('A valid staging project reference is required.');
   }
-  if ((mode === 'probe' || mode === 'prepare-default-privileges') && !noProductionMode) {
+  if ((mode === 'probe' || mode === 'prepare-default-privileges' || mode === 'check-default-privileges') && !noProductionMode) {
     throw new Error('This command requires explicit no-production-project mode.');
   }
   if (env.SUPABASE_STAGING_SCHEMA !== 'public') throw new Error('SUPABASE_STAGING_SCHEMA must equal public.');

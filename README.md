@@ -643,6 +643,7 @@ Required environment names:
 | `SUPABASE_STAGING_PREFLIGHT_CONFIRMATION` | Must equal `I_CONFIRM_READ_ONLY_SUPABASE_STAGING_PREFLIGHT` for the read-only catalog check. |
 | `SUPABASE_STAGING_PROBE_CONFIRMATION` | Must equal `I_CONFIRM_READ_ONLY_SUPABASE_STAGING_IDENTITY_PROBE` for the read-only identity probe. |
 | `SUPABASE_STAGING_DEFAULT_PRIVILEGE_CONFIRMATION` | Must equal `I_CONFIRM_STAGING_DEFAULT_PRIVILEGE_HARDENING` for the one-time, owner-scoped default-privilege preparation command. |
+| `SUPABASE_STAGING_DEFAULT_PRIVILEGE_DIAGNOSTIC_CONFIRMATION` | Must equal `I_CONFIRM_READ_ONLY_STAGING_DEFAULT_PRIVILEGE_DIAGNOSTIC` for the read-only preparation checkpoint diagnostic. |
 
 Do not set generic `DATABASE_URL`, `MIGRATION_DATABASE_URL`, `FRESH_DATABASE_URL`, or discrete `SQL_*` settings to the same target when invoking these commands. The staging scripts use only `SUPABASE_STAGING_DATABASE_URL` and fail on configured target collisions or uncomparable targets. Each command validates target identity again. The PostgreSQL server's internal port is not compared to the host/pooler URL port. The connection explicitly starts with `search_path=public` and verifies `current_schema()` and the effective path before schema operations.
 
@@ -675,6 +676,14 @@ bun run db:prepare:supabase-staging-default-privileges -- --confirm-staging-defa
 ```
 
 This command requires the same explicit staging target, verified project reference, target fingerprint, official-CA TLS, identity and collision checks, plus `SUPABASE_STAGING_ENABLED=true`, explicit no-Production mode and its confirmation, and the command-specific flag and `SUPABASE_STAGING_DEFAULT_PRIVILEGE_CONFIRMATION=I_CONFIRM_STAGING_DEFAULT_PRIVILEGE_HARDENING`. The connected `current_database()`, `session_user`, `current_user`, schema, and search path are checked again. The configured runtime/migration owner must equal the observed effective role, and the target must still have no application tables or migration history.
+
+If the mutating command stops at `TARGET_STATE_FAILED`, use the read-only checkpoint diagnostic to identify the failing precondition:
+
+```sh
+bun run db:check:supabase-staging-default-privileges -- --confirm-staging-default-privilege-diagnostic
+```
+
+Set `SUPABASE_STAGING_DEFAULT_PRIVILEGE_DIAGNOSTIC_CONFIRMATION=I_CONFIRM_READ_ONLY_STAGING_DEFAULT_PRIVILEGE_DIAGNOSTIC`. The diagnostic uses the same target resolver and catalog checks, starts `BEGIN READ ONLY`, and reports only sanitized PASS/FAIL checkpoints for schema state, migration-history eligibility, public-object inventory, API roles, and default ACLs. It performs no schema or privilege changes and rolls back before closing. A checkpoint failure requires manual review; do not bypass it or rerun the mutating command blindly.
 
 It inspects default ACLs before changing anything, then in one transaction runs only fixed `ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA public REVOKE ALL ON TABLES/SEQUENCES FROM anon/authenticated` statements. It checks the resulting catalog state before commit. The scope is limited to future `public` tables and sequences created by the verified application owner. It does not alter existing table or sequence grants, global defaults, `PUBLIC` grants, roles, schemas, event triggers, or defaults owned by `supabase_admin`. The observed `supabase_admin` defaults remain visible in preflight and are compared with the known catalog snapshot; unexpected owners or ACL entries stop for review. If preconditions or postconditions fail, the transaction rolls back and the command exits nonzero. Do not use it to repair an ambiguous target or after a partial initialization.
 

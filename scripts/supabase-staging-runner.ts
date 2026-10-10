@@ -28,7 +28,7 @@ import {
 import { loadVerifiedSupabaseStagingSslOptions } from '../src/db/supabase-staging-tls.ts';
 
 export type StagingMode = 'initialize' | 'migrate';
-type DiagnosticMode = StagingMode | 'preflight' | 'default-privilege-preparation';
+type DiagnosticMode = StagingMode | 'preflight' | 'default-privilege-preparation' | 'default-privilege-diagnostic';
 
 export type StagingRuntime = {
   inspect: () => Promise<StagingCatalogState>;
@@ -235,7 +235,8 @@ const publicObjectInventorySql = `
 function diagnostic(mode: DiagnosticMode, stage: string) {
   const subject = mode === 'initialize' ? 'Staging baseline initialization'
     : mode === 'migrate' ? 'Staging migration'
-      : mode === 'default-privilege-preparation' ? 'Staging default-privilege preparation' : 'Read-only staging preflight';
+      : mode === 'default-privilege-preparation' ? 'Staging default-privilege preparation'
+        : mode === 'default-privilege-diagnostic' ? 'Read-only default-privilege diagnostic' : 'Read-only staging preflight';
   return `[SUPABASE_STAGING_${stage}] ${subject} ${stage.toLowerCase().replaceAll('_', ' ')}; no credentials or database details are included.`;
 }
 
@@ -604,6 +605,82 @@ export async function runSupabaseStagingDefaultPrivilegePreparation(
     }
   }
   return exitCode;
+}
+
+/**
+ * Read-only checkpoint diagnostic for the preparation preconditions. This path
+ * deliberately has no mutation methods and uses BEGIN READ ONLY on one client.
+ */
+export async function runSupabaseStagingDefaultPrivilegeDiagnostic(
+  args: string[],
+  env: Record<string, string | undefined>,
+  dependencies: DefaultPrivilegePreparationDependencies,
+  report: (line: string) => void = () => undefined,
+): Promise<number> {
+  let settings: StagingDatabaseSettings;
+  try {
+    settings = resolveSupabaseStagingSettings('check-default-privileges', args, env);
+    if (settings.runtimeUser === 'supabase_admin') throw new Error('platform owner is not an application owner');
+  } catch {
+    report(diagnostic('default-privilege-diagnostic', 'CONFIGURATION_INVALID'));
+    return 2;
+  }
+  let connection: Awaited<ReturnType<DefaultPrivilegePreparationDependencies['open']>> | undefined;
+  let failed = false;
+  let stage = 'CONNECTION_FAILED';
+  const checkpoint = async (name: string, operation: () => Promise<void>) => {
+    try { await operation(); report(`PASS ${name}`); }
+    catch { failed = true; report(`FAIL ${name}; manual review required.`); }
+  };
+  try {
+    connection = await dependencies.open(settings);
+    const client = connection.client;
+    stage = 'READ_ONLY_TRANSACTION_REQUIRED';
+    await client.query('BEGIN READ ONLY');
+    const identityResult = await client.query<{ database: string; loginUser: string; user: string; currentSchema: string; searchPath: string; serverPort: number; transactionReadOnly: boolean }>(`SELECT current_database() AS database, session_user AS "loginUser", current_user AS user, current_schema() AS "currentSchema", current_setting('search_path') AS "searchPath", inet_server_port() AS "serverPort", current_setting('transaction_read_only')::boolean AS "transactionReadOnly"`);
+    const identity = identityResult.rows[0];
+    if (!identity || identity.transactionReadOnly !== true) throw new Error('read-only transaction was not confirmed');
+    stage = 'SCHEMA_STATE_FAILED';
+    await checkpoint('schema-state validation', async () => {
+      assertStagingIdentity({ ...identity, serverPort: Number(identity.serverPort) }, settings);
+      if (identity.user !== settings.runtimeUser || identity.currentSchema !== 'public' || identity.searchPath.replaceAll('"', '').split(',').map((part) => part.trim()).join(',') !== 'public') throw new Error('identity mismatch');
+      const result = await client.query<{ public: boolean; auth: boolean; storage: boolean; drizzle: boolean; supabaseMigrations: boolean; drizzleHistory: boolean; supabaseHistory: boolean; applicationTables: string[] }>(`SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='public') AS public, EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='auth') AS auth, EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='storage') AS storage, EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='drizzle') AS drizzle, EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='supabase_migrations') AS "supabaseMigrations", to_regclass('drizzle.__drizzle_migrations') IS NOT NULL AS "drizzleHistory", to_regclass('supabase_migrations.schema_migrations') IS NOT NULL AS "supabaseHistory", ARRAY(SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','S','f') AND c.relname=ANY($1::text[])) AS "applicationTables"`, [dependencies.applicationTableNames]);
+      const state = result.rows[0];
+      if (!state) throw new Error('schema state unavailable');
+      assertStagingRequiredSchemas({ public: state.public, auth: state.auth, storage: state.storage, drizzle: state.drizzle, supabaseMigrations: state.supabaseMigrations });
+      if (state.drizzle || state.drizzleHistory || state.supabaseMigrations || state.supabaseHistory || state.applicationTables.length) throw new Error('existing application objects or migration history');
+    });
+    stage = 'MIGRATION_HISTORY_FAILED';
+    await checkpoint('migration-history eligibility', async () => {
+      const result = await client.query<{ drizzle: boolean; supabase: boolean }>(`SELECT to_regclass('drizzle.__drizzle_migrations') IS NOT NULL AS drizzle, to_regclass('supabase_migrations.schema_migrations') IS NOT NULL AS supabase`);
+      if (result.rows[0]?.drizzle || result.rows[0]?.supabase) throw new Error('migration history exists');
+    });
+    stage = 'PUBLIC_OBJECT_INVENTORY_FAILED';
+    await checkpoint('public-object inventory validation', async () => {
+      const result = await client.query<{ name: string; kind: string; extensionOwned: boolean }>(publicObjectInventorySql);
+      if (result.rows.some((object) => !object.extensionOwned && !(object.kind === 'routine' && object.name === 'rls_auto_enable'))) throw new Error('unexpected public object');
+    });
+    stage = 'API_ROLE_VALIDATION_FAILED';
+    await checkpoint('API-role validation', async () => {
+      const result = await client.query<{ role: string; superuser: boolean; bypassRls: boolean; inheritsOwner: boolean; memberOfOwner: boolean; publicCreate: boolean; authCreate: boolean; storageCreate: boolean }>(`SELECT r.rolname AS role, r.rolsuper AS "superuser", r.rolbypassrls AS "bypassRls", pg_has_role(r.rolname, current_user, 'USAGE') AS "inheritsOwner", pg_has_role(r.rolname, current_user, 'MEMBER') AS "memberOfOwner", has_schema_privilege(r.rolname, 'public', 'CREATE') AS "publicCreate", has_schema_privilege(r.rolname, 'auth', 'CREATE') AS "authCreate", has_schema_privilege(r.rolname, 'storage', 'CREATE') AS "storageCreate" FROM pg_roles r WHERE r.rolname IN ('anon','authenticated') ORDER BY r.rolname`);
+      assertStagingDataApiRoles(result.rows.map((row) => row.role));
+      if (result.rows.length !== 2 || result.rows.some((row) => row.superuser || row.bypassRls || row.inheritsOwner || row.memberOfOwner || row.publicCreate || row.authCreate || row.storageCreate)) throw new Error('API roles are unsafe');
+    });
+    stage = 'DEFAULT_ACL_INVENTORY_FAILED';
+    await checkpoint('default-ACL inventory validation', async () => {
+      const result = await client.query<NonNullable<StagingCatalogState['defaultAclInventory']>[number]>(defaultAclInventorySql);
+      assertStagingDefaultAclInventory(result.rows, settings.runtimeUser, true);
+    });
+  } catch {
+    failed = true;
+    report(diagnostic('default-privilege-diagnostic', stage));
+  } finally {
+    if (connection) {
+      try { await connection.client.query('ROLLBACK'); } catch { failed = true; }
+      try { await connection.close(); } catch { failed = true; report(diagnostic('default-privilege-diagnostic', 'CONNECTION_CLOSE_FAILED')); }
+    }
+  }
+  return failed ? 1 : 0;
 }
 
 export async function runSupabaseStagingOperations(
@@ -1179,7 +1256,7 @@ export async function openPostgresReadOnlyRuntime(settings: StagingDatabaseSetti
   return { inspect: runtime.inspect, close: runtime.close };
 }
 
-async function openPostgresDefaultPrivilegeConnection(settings: StagingDatabaseSettings) {
+export async function openPostgresDefaultPrivilegeConnection(settings: StagingDatabaseSettings) {
   const pool = await createStagingPool(settings);
   let client: PoolClient | undefined;
   try {

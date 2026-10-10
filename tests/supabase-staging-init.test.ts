@@ -24,6 +24,7 @@ import {
   runSupabaseStagingPreflight,
   runSupabaseStagingCommand,
   runSupabaseStagingDefaultPrivilegePreparation,
+  runSupabaseStagingDefaultPrivilegeDiagnostic,
   beginVerifiedReadOnlyTransaction,
   openVerifiedReadOnlySession,
   StagingReadOnlyTransactionError,
@@ -151,17 +152,17 @@ function emptyPreflightState(deps: StagingRunnerDependencies): StagingCatalogSta
   };
 }
 
-function preparationHarness(options: { afterAcl?: ReturnType<typeof applicationOwnerDefaults>; applicationTables?: string[]; publicObjects?: Array<{ name: string; kind: string; extensionOwned: boolean }>; existingHistory?: boolean } = {}) {
+function preparationHarness(options: { afterAcl?: ReturnType<typeof applicationOwnerDefaults>; applicationTables?: string[]; publicObjects?: Array<{ name: string; kind: string; extensionOwned: boolean }>; existingHistory?: boolean; readOnly?: boolean } = {}) {
   const calls: string[] = [];
   let aclReads = 0;
   let closeCount = 0;
   const client = {
     async query<Row = unknown>(sql: string): Promise<{ rows: Row[] }> {
       calls.push(sql.trim());
-      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK' || sql.startsWith('ALTER DEFAULT PRIVILEGES')) return { rows: [] as Row[] };
+      if (sql === 'BEGIN' || sql === 'BEGIN READ ONLY' || sql === 'COMMIT' || sql === 'ROLLBACK' || sql.startsWith('ALTER DEFAULT PRIVILEGES')) return { rows: [] as Row[] };
       if (sql.includes('current_database() AS database')) return { rows: [{
         database: 'postgres', loginUser: 'postgres', user: 'postgres', currentSchema: 'public', searchPath: 'public',
-        serverPort: 5432, transactionReadOnly: false,
+        serverPort: 5432, transactionReadOnly: options.readOnly ?? false,
       }] as Row[] };
       if (sql.includes('to_regclass(\'drizzle.__drizzle_migrations\')')) return { rows: [{
         public: true, auth: true, storage: true, drizzle: options.existingHistory ?? false, supabaseMigrations: false,
@@ -1004,5 +1005,53 @@ describe('Supabase staging initialization guard', () => {
       ...deps, open: async () => ({ inspect: async () => current, close: async () => undefined }),
     }, () => undefined);
     assert.equal(code, 1);
+  });
+
+  it('diagnoses each preparation checkpoint in a read-only transaction without permission-changing SQL', async () => {
+    const harness = preparationHarness({ readOnly: true });
+    const lines: string[] = [];
+    const code = await runSupabaseStagingDefaultPrivilegeDiagnostic(
+      ['--confirm-staging-default-privilege-diagnostic'],
+      { ...harness.env, SUPABASE_STAGING_DEFAULT_PRIVILEGE_DIAGNOSTIC_CONFIRMATION: 'I_CONFIRM_READ_ONLY_STAGING_DEFAULT_PRIVILEGE_DIAGNOSTIC' },
+      harness.depsForRun,
+      (line) => lines.push(line),
+    );
+    assert.equal(code, 0);
+    assert.ok(lines.some((line) => line.includes('PASS schema-state validation')));
+    assert.ok(lines.some((line) => line.includes('PASS migration-history eligibility')));
+    assert.ok(lines.some((line) => line.includes('PASS public-object inventory validation')));
+    assert.ok(lines.some((line) => line.includes('PASS API-role validation')));
+    assert.ok(lines.some((line) => line.includes('PASS default-ACL inventory validation')));
+    assert.ok(harness.calls.includes('BEGIN READ ONLY'));
+    assert.ok(harness.calls.includes('ROLLBACK'));
+    assert.equal(harness.calls.some((call) => /^(ALTER|CREATE|DROP|GRANT|REVOKE)\b/i.test(call)), false);
+  });
+
+  it('reports an individual public-object checkpoint failure while continuing read-only inspection', async () => {
+    const harness = preparationHarness({ readOnly: true, publicObjects: [{ name: 'unexpected', kind: 'relation', extensionOwned: false }] });
+    const lines: string[] = [];
+    const code = await runSupabaseStagingDefaultPrivilegeDiagnostic(
+      ['--confirm-staging-default-privilege-diagnostic'],
+      { ...harness.env, SUPABASE_STAGING_DEFAULT_PRIVILEGE_DIAGNOSTIC_CONFIRMATION: 'I_CONFIRM_READ_ONLY_STAGING_DEFAULT_PRIVILEGE_DIAGNOSTIC' },
+      harness.depsForRun, (line) => lines.push(line),
+    );
+    assert.equal(code, 1);
+    assert.ok(lines.some((line) => line.includes('FAIL public-object inventory validation')));
+    assert.ok(lines.some((line) => line.includes('PASS API-role validation')));
+    assert.equal(harness.calls.some((call) => /^(ALTER|CREATE|DROP|GRANT|REVOKE)\b/i.test(call)), false);
+  });
+
+  it('fails the diagnostic before catalog checkpoints when read-only status is false', async () => {
+    const harness = preparationHarness({ readOnly: false });
+    const lines: string[] = [];
+    const code = await runSupabaseStagingDefaultPrivilegeDiagnostic(
+      ['--confirm-staging-default-privilege-diagnostic'],
+      { ...harness.env, SUPABASE_STAGING_DEFAULT_PRIVILEGE_DIAGNOSTIC_CONFIRMATION: 'I_CONFIRM_READ_ONLY_STAGING_DEFAULT_PRIVILEGE_DIAGNOSTIC' },
+      harness.depsForRun,
+      (line) => lines.push(line),
+    );
+    assert.equal(code, 1);
+    assert.ok(lines.some((line) => line.includes('READ_ONLY_TRANSACTION_REQUIRED')));
+    assert.equal(harness.calls.some((call) => call.includes('pg_default_acl')), false);
   });
 });

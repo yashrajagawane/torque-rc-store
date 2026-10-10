@@ -25,6 +25,7 @@
     "db:probe:supabase-staging": "tsx scripts/probe-supabase-staging.ts",
     "db:migrate:supabase-staging": "tsx scripts/migrate-supabase-staging.ts",
     "db:prepare:supabase-staging-default-privileges": "tsx scripts/prepare-supabase-staging-default-privileges.ts",
+    "db:check:supabase-staging-default-privileges": "tsx scripts/check-supabase-staging-default-privileges.ts",
     "db:migrate": "drizzle-kit migrate --config=src/db/drizzle.config.ts",
     "db:check": "drizzle-kit check --config=src/db/drizzle.config.ts",
     "db:seed:reference": "tsx scripts/seed-reference-data.ts",
