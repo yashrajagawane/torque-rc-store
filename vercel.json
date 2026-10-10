@@ -8,6 +8,10 @@
       "maxDuration": 20
     }
   },
+  "routes": [
+    { "handle": "filesystem" },
+    { "src": "/(.*)", "dest": "/server.ts" }
+  ],
   "headers": [
     {
       "source": "/(.*)",
