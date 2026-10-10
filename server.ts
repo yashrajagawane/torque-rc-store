@@ -194,7 +194,10 @@ if (process.env.NODE_ENV === 'production') {
     server: { middlewareMode: true },
     appType: 'custom',
   });
-  app.use(vite.middlewares);
+  // Adapt Vite's Connect server to Express's middleware overload explicitly.
+  // Passing the Connect server directly is rejected by newer TypeScript/
+  // @types/express combinations even though both are compatible at runtime.
+  app.use((req, res, next) => vite.middlewares(req, res, next));
   app.get('*', async (req, res, next) => {
     const url = req.originalUrl;
     try {
