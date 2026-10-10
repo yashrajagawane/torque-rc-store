@@ -55,6 +55,14 @@ export type StagingPreflightDependencies = Omit<StagingRunnerDependencies, 'open
   open: (settings: StagingDatabaseSettings) => Promise<StagingPreflightRuntime>;
 };
 
+/** Preserve rows returned by the catalog audit when assembling a staging snapshot. */
+export function attachDataApiRoleAudit<T extends Omit<StagingCatalogState, 'dataApiRoleAudit'>>(
+  state: T,
+  rows: NonNullable<StagingCatalogState['dataApiRoleAudit']>,
+): T & Pick<StagingCatalogState, 'dataApiRoleAudit'> {
+  return { ...state, dataApiRoleAudit: rows };
+}
+
 export class StagingReadOnlyTransactionError extends Error {
   readonly category = 'READ_ONLY_TRANSACTION_REQUIRED';
   constructor() { super('PostgreSQL did not confirm an explicit read-only transaction.'); }
@@ -875,7 +883,7 @@ export async function openPostgresRuntime(settings: StagingDatabaseSettings, rea
       });
       (defaults[row.table_name] ??= {})[row.column_name] = row.default_expression;
     }
-    return {
+    return attachDataApiRoleAudit({
       identity: {
         database: identityRow.database,
         loginUser: identityRow.login_user,
@@ -912,7 +920,7 @@ export async function openPostgresRuntime(settings: StagingDatabaseSettings, rea
       applicationPolicies: policyRows.rows.map((row) => row.policyname),
       contactInquiryStatusConstraint: contactCheck.rows[0]?.definition,
       contactInquiryCreatedAtIndex: contactIndex.rows[0]?.indexdef,
-    };
+    }, dataApiRoleAudit.rows);
   };
 
   return {

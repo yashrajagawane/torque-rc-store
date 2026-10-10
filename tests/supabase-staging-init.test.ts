@@ -17,6 +17,7 @@ import {
   type StagingDatabaseSettings,
 } from '../src/db/supabase-staging-guard.ts';
 import {
+  attachDataApiRoleAudit,
   loadStagingRunnerDependencies,
   runSupabaseStagingPreflight,
   runSupabaseStagingCommand,
@@ -364,7 +365,7 @@ describe('Supabase staging initialization guard', () => {
     assert.ok(deps.expectedBaselineConstraints.includes('products_pkey'));
   });
 
-  it('requires both Supabase Data API roles and requires a shared runtime/migration role', () => {
+  it('requires both Supabase Data API roles and preserves the returned catalog audit rows', async () => {
     assert.doesNotThrow(() => assertStagingDataApiRoles(['anon', 'authenticated']));
     assert.throws(() => assertStagingDataApiRoles(['anon']));
     const safeRoles = ['anon', 'authenticated'].map((role) => ({
@@ -372,6 +373,11 @@ describe('Supabase staging initialization guard', () => {
       authUsage: false, authCreate: false, storageUsage: false, storageCreate: false,
       drizzleUsage: false, drizzleCreate: false, applicationTablePrivileges: [], applicationColumnPrivileges: [], applicationSequencePrivileges: [], directApplicationTableAcl: [], directApplicationColumnAcl: [], directApplicationSequenceAcl: [], globalDefaultTablePrivileges: [], globalDefaultSequencePrivileges: [], schemaDefaultTablePrivileges: [], schemaDefaultSequencePrivileges: [],
     }));
+    const deps = await loadStagingRunnerDependencies(async () => { throw new Error('unused'); });
+    const { dataApiRoleAudit: _priorAudit, ...snapshotWithoutAudit } = emptyPreflightState(deps);
+    const mappedSnapshot = attachDataApiRoleAudit(snapshotWithoutAudit, safeRoles);
+    assert.deepEqual(mappedSnapshot.dataApiRoleAudit, safeRoles);
+    assert.doesNotThrow(() => assertStagingDataApiPrivileges(mappedSnapshot));
     assert.doesNotThrow(() => assertStagingDataApiPrivileges({ dataApiRoleAudit: safeRoles }));
     // Ordinary schema USAGE is informational; access to application objects is assessed separately.
     assert.doesNotThrow(() => assertStagingDataApiPrivileges({ dataApiRoleAudit: safeRoles.map((role) => ({
