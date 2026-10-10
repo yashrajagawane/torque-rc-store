@@ -25,6 +25,7 @@ import {
   runSupabaseStagingCommand,
   runSupabaseStagingDefaultPrivilegePreparation,
   runSupabaseStagingDefaultPrivilegeDiagnostic,
+  runSupabaseStagingBaselineDiagnostic,
   beginVerifiedReadOnlyTransaction,
   openVerifiedReadOnlySession,
   StagingReadOnlyTransactionError,
@@ -155,7 +156,7 @@ function emptyPreflightState(deps: StagingRunnerDependencies): StagingCatalogSta
   };
 }
 
-function preparationHarness(options: { afterAcl?: ReturnType<typeof applicationOwnerDefaults>; applicationTables?: string[]; publicObjects?: Array<{ name: string; kind: string; extensionOwned: boolean }>; existingHistory?: boolean; readOnly?: boolean } = {}) {
+function preparationHarness(options: { afterAcl?: ReturnType<typeof applicationOwnerDefaults>; applicationTables?: unknown; publicObjects?: Array<{ name: string; kind: string; extensionOwned: boolean }>; existingHistory?: boolean; readOnly?: boolean } = {}) {
   const calls: string[] = [];
   let aclReads = 0;
   let closeCount = 0;
@@ -802,6 +803,40 @@ describe('Supabase staging initialization guard', () => {
     assert.deepEqual(current.supabaseAutomaticRlsFunctions, [approvedAutoRlsFunction]);
   });
 
+  it('verifies an initialized baseline through read-only checkpoints without invoking mutations', async () => {
+    const deps = await loadStagingRunnerDependencies(async () => { throw new Error('unused'); });
+    const current = state(deps);
+    let mutationCalled = false;
+    const lines: string[] = [];
+    const code = await runSupabaseStagingBaselineDiagnostic(['--confirm-staging-preflight'], baseEnv, {
+      ...deps,
+      open: async () => ({
+        inspect: async () => current,
+        applyBaseline: async () => { mutationCalled = true; },
+        applyForwardMigrations: async () => { mutationCalled = true; },
+        close: async () => undefined,
+      }),
+    }, (line) => lines.push(line));
+    assert.equal(code, 0);
+    assert.equal(mutationCalled, false);
+    assert.ok(lines.some((line) => line.includes('PASS baseline migration history validation')));
+    assert.ok(lines.some((line) => line.includes('PASS baseline RLS validation')));
+    assert.ok(lines.some((line) => line.includes('BASELINE DIAGNOSTIC PASSED')));
+  });
+
+  it('reports the exact failed baseline invariant without repairing it', async () => {
+    const deps = await loadStagingRunnerDependencies(async () => { throw new Error('unused'); });
+    const invalid = { ...state(deps), applicationRlsTables: [] };
+    const lines: string[] = [];
+    const code = await runSupabaseStagingBaselineDiagnostic(['--confirm-staging-preflight'], baseEnv, {
+      ...deps,
+      open: async () => ({ inspect: async () => invalid, applyBaseline: async () => assert.fail('must not mutate'), applyForwardMigrations: async () => assert.fail('must not migrate'), close: async () => undefined }),
+    }, (line) => lines.push(line));
+    assert.equal(code, 1);
+    assert.ok(lines.some((line) => line.includes('FAIL baseline RLS validation')));
+    assert.ok(lines.some((line) => line.includes('BASELINE DIAGNOSTIC FAILED')));
+  });
+
   it('fails verification if baseline execution changes the recognized automatic-RLS catalog state', async () => {
     const deps = await loadStagingRunnerDependencies(async () => { throw new Error('unused'); });
     let current: StagingCatalogState = {
@@ -1085,6 +1120,18 @@ describe('Supabase staging initialization guard', () => {
     );
     assert.equal(applicationCode, 1);
     assert.ok(applicationLines.some((line) => line.includes('FAIL conflicting application baseline objects absence')));
+  });
+
+  it('fails closed when the application-table catalog result is not a decoded text array', async () => {
+    const harness = preparationHarness({ readOnly: true, applicationTables: '{}' });
+    const lines: string[] = [];
+    const code = await runSupabaseStagingDefaultPrivilegeDiagnostic(
+      ['--confirm-staging-default-privilege-diagnostic'],
+      { ...harness.env, SUPABASE_STAGING_DEFAULT_PRIVILEGE_DIAGNOSTIC_CONFIRMATION: 'I_CONFIRM_READ_ONLY_STAGING_DEFAULT_PRIVILEGE_DIAGNOSTIC' },
+      harness.depsForRun, (line) => lines.push(line),
+    );
+    assert.equal(code, 1);
+    assert.equal(lines.some((line) => line.includes('PASS conflicting application baseline objects absence')), false);
   });
 
   it('fails the diagnostic before catalog checkpoints when read-only status is false', async () => {

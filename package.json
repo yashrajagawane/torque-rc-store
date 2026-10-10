@@ -22,6 +22,7 @@
     "db:init:fresh": "tsx scripts/initialize-fresh-database.ts",
     "db:init:supabase-staging": "tsx scripts/initialize-supabase-staging.ts",
     "db:check:supabase-staging": "tsx scripts/check-supabase-staging.ts",
+    "db:check:supabase-staging-baseline": "tsx scripts/check-supabase-staging-baseline.ts",
     "db:probe:supabase-staging": "tsx scripts/probe-supabase-staging.ts",
     "db:migrate:supabase-staging": "tsx scripts/migrate-supabase-staging.ts",
     "db:prepare:supabase-staging-default-privileges": "tsx scripts/prepare-supabase-staging-default-privileges.ts",

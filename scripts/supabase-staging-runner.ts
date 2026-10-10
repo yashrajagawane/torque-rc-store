@@ -186,6 +186,13 @@ const defaultAclInventorySql = `
   ORDER BY owner, schema, "objectType", grantee, privilege
 `;
 
+function requireApplicationTableNames(value: unknown): string[] {
+  if (!Array.isArray(value) || value.some((name) => typeof name !== 'string')) {
+    throw new Error('application table catalog result is not a text array');
+  }
+  return value;
+}
+
 const publicObjectInventorySql = `
   SELECT c.relname AS name, 'relation' AS kind,
     EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e') AS "extensionOwned"
@@ -461,6 +468,102 @@ export async function runSupabaseStagingPreflight(
 }
 
 /**
+ * Read-only verification for a target that already contains the approved
+ * baseline. This deliberately does not use the empty-target preflight and
+ * exposes no migration or repair operation.
+ */
+export async function runSupabaseStagingBaselineDiagnostic(
+  args: string[],
+  env: Record<string, string | undefined>,
+  dependencies: StagingPreflightDependencies,
+  report: (line: string) => void = () => undefined,
+): Promise<number> {
+  let settings: StagingDatabaseSettings;
+  try {
+    settings = resolveSupabaseStagingSettings('check', args, env) as StagingDatabaseSettings;
+  } catch {
+    report(diagnostic('preflight', 'CONFIGURATION_INVALID'));
+    return 2;
+  }
+  let runtime: StagingPreflightRuntime | undefined;
+  let failures = 0;
+  let exitCode = 1;
+  const check = (name: string, fn: () => void) => {
+    try { fn(); report(`PASS ${name}`); } catch { failures += 1; report(`FAIL ${name}; details withheld.`); }
+  };
+  try {
+    runtime = await dependencies.open(settings);
+    const state = await runtime.inspect();
+    check('connection identity validation', () => assertStagingIdentity(state.identity, settings));
+    check('required schemas validation', () => assertStagingRequiredSchemas(state.schemas));
+    check('automatic-RLS configuration validation', () => assertSupabaseAutomaticRlsConfiguration(state, settings.automaticRlsRequired));
+    check('baseline migration history validation', () => {
+      if (state.supabaseMigrationSchemaExists || state.supabaseMigrationRecords !== 0) throw new Error('unexpected Supabase migration history');
+      assertStagingMigrationHistory(state.migrationHistory, dependencies.baseline, dependencies.forward, true);
+      if (state.migrationHistory.length !== 1) throw new Error('forward migrations are present');
+    });
+    check('baseline application table validation', () => {
+      const actual = new Set(state.applicationTables);
+      if (actual.size !== dependencies.expectedBaselineTables.length
+        || dependencies.expectedBaselineTables.some((table) => !actual.has(table))
+        || actual.has('contact_inquiries')) throw new Error('baseline table set mismatch');
+    });
+    check('baseline column validation', () => {
+      for (const [table, columns] of Object.entries(dependencies.expectedBaselineColumns)) {
+        const actual = new Map((state.applicationColumns[table] ?? []).map((column) => [column.name, column]));
+        if (actual.size !== columns.length || columns.some((column) => {
+          const found = actual.get(column.name);
+          const expectedType = column.type === 'serial' ? 'integer' : column.type === 'bigserial' ? 'bigint' : column.type === 'timestamp' ? 'timestamp without time zone' : column.type;
+          return !found || normalizeStagingSqlType(found.type) !== normalizeStagingSqlType(expectedType)
+            || found.notNull !== column.notNull || found.hasDefault !== column.hasDefault;
+        })) throw new Error('baseline columns mismatch');
+      }
+    });
+    check('baseline index validation', () => {
+      if (dependencies.expectedBaselineIndexes.some((name) => !state.applicationIndexes.includes(name))) throw new Error('baseline indexes mismatch');
+    });
+    check('baseline constraint validation', () => {
+      const actual = new Set(state.applicationConstraints);
+      if (actual.size !== dependencies.expectedBaselineConstraints.length
+        || dependencies.expectedBaselineConstraints.some((name) => !actual.has(name))) throw new Error('baseline constraints mismatch');
+    });
+    check('baseline RLS validation', () => {
+      const actual = new Set(state.applicationRlsTables);
+      if (actual.size !== dependencies.expectedBaselineTables.length
+        || dependencies.expectedBaselineTables.some((table) => !actual.has(table))
+        || state.applicationPolicies.length) throw new Error('baseline RLS state mismatch');
+    });
+    check('Drizzle metadata validation', () => {
+      if (!state.drizzleSchemaExists || state.drizzleRelations.length !== 2
+        || !state.drizzleRelations.includes('__drizzle_migrations')
+        || !state.drizzleRelations.includes('__drizzle_migrations_id_seq')) throw new Error('Drizzle metadata mismatch');
+    });
+    check('public object validation', () => {
+      const permitted = new Set([
+        ...dependencies.expectedBaselineTables,
+        ...dependencies.expectedBaselineTables.map((table) => `${table}_id_seq`),
+        ...dependencies.expectedBaselineTables.map((table) => `${table}_pkey`),
+        ...dependencies.expectedBaselineIndexes,
+        ...dependencies.expectedBaselineConstraints,
+      ]);
+      if (state.publicObjects.some((object) => !object.extensionOwned
+        && !isApprovedSupabaseAutomaticRlsRoutine(state, object)
+        && (object.kind !== 'relation' || !permitted.has(object.name)))) throw new Error('unexpected public object');
+    });
+    report(failures === 0
+      ? 'BASELINE DIAGNOSTIC PASSED; no schema changes, migrations, or repairs were performed.'
+      : 'BASELINE DIAGNOSTIC FAILED; no schema changes, migrations, or repairs were performed.');
+    exitCode = failures === 0 ? 0 : 1;
+  } catch {
+    report(diagnostic('preflight', runtime ? 'BASELINE_DIAGNOSTIC_FAILED' : 'CONNECTION_FAILED'));
+    exitCode = 1;
+  } finally {
+    if (runtime) await runtime.close().catch(() => { report(diagnostic('preflight', 'CONNECTION_CLOSE_FAILED')); exitCode = 1; });
+  }
+  return exitCode;
+}
+
+/**
  * Runs already-resolved database operations. Production CLIs call this only
  * through runSupabaseStagingCommand, which validates all target safeguards
  * first. Local integration tests may inject an explicitly verified loopback
@@ -509,7 +612,7 @@ export async function runSupabaseStagingDefaultPrivilegePreparation(
 
     stage = 'TARGET_STATE_FAILED';
     const schemas = await client.query<{ public: boolean; auth: boolean; storage: boolean; drizzle: boolean; supabaseMigrations: boolean;
-      drizzleHistory: boolean; supabaseHistory: boolean; applicationTables: string[] }>(`
+      drizzleHistory: boolean; supabaseHistory: boolean; applicationTables: unknown }>(`
       SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='public') AS public,
              EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='auth') AS auth,
              EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='storage') AS storage,
@@ -518,17 +621,18 @@ export async function runSupabaseStagingDefaultPrivilegePreparation(
              to_regclass('drizzle.__drizzle_migrations') IS NOT NULL AS "drizzleHistory",
              to_regclass('supabase_migrations.schema_migrations') IS NOT NULL AS "supabaseHistory",
              ARRAY(
-               SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+               SELECT c.relname::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
                WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','S','f') AND c.relname=ANY($1::text[])
                ORDER BY c.relname
              ) AS "applicationTables"
     `, [dependencies.applicationTableNames]);
     const schemaState = schemas.rows[0];
     if (!schemaState) throw new Error('schema state unavailable');
+    const applicationTables = requireApplicationTableNames(schemaState.applicationTables);
     assertStagingRequiredSchemas({ public: schemaState.public, auth: schemaState.auth, storage: schemaState.storage,
       drizzle: schemaState.drizzle, supabaseMigrations: schemaState.supabaseMigrations });
     if (schemaState.drizzle || schemaState.drizzleHistory || schemaState.supabaseMigrations || schemaState.supabaseHistory
-      || schemaState.applicationTables.length) throw new Error('existing application objects or migration history');
+      || applicationTables.length) throw new Error('existing application objects or migration history');
 
     const publicObjects = await client.query<{ name: string; kind: string; extensionOwned: boolean }>(publicObjectInventorySql);
     const unexpectedPublicObjects = publicObjects.rows.filter((object) => !object.extensionOwned
@@ -650,8 +754,9 @@ export async function runSupabaseStagingDefaultPrivilegeDiagnostic(
     await checkpoint('target schema and search-path validation', async () => {
       if (identity.currentSchema !== 'public' || identity.searchPath.replaceAll('"', '').split(',').map((part) => part.trim()).join(',') !== 'public') throw new Error('application schema or search path mismatch');
     });
-    const schemaResult = await client.query<{ public: boolean; auth: boolean; storage: boolean; drizzle: boolean; supabaseMigrations: boolean; drizzleHistory: boolean; supabaseHistory: boolean; applicationTables: string[] }>(`SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='public') AS public, EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='auth') AS auth, EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='storage') AS storage, EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='drizzle') AS drizzle, EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='supabase_migrations') AS "supabaseMigrations", to_regclass('drizzle.__drizzle_migrations') IS NOT NULL AS "drizzleHistory", to_regclass('supabase_migrations.schema_migrations') IS NOT NULL AS "supabaseHistory", ARRAY(SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','S','f') AND c.relname=ANY($1::text[])) AS "applicationTables"`, [dependencies.applicationTableNames]);
+    const schemaResult = await client.query<{ public: boolean; auth: boolean; storage: boolean; drizzle: boolean; supabaseMigrations: boolean; drizzleHistory: boolean; supabaseHistory: boolean; applicationTables: unknown }>(`SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='public') AS public, EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='auth') AS auth, EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='storage') AS storage, EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='drizzle') AS drizzle, EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='supabase_migrations') AS "supabaseMigrations", to_regclass('drizzle.__drizzle_migrations') IS NOT NULL AS "drizzleHistory", to_regclass('supabase_migrations.schema_migrations') IS NOT NULL AS "supabaseHistory", ARRAY(SELECT c.relname::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','S','f') AND c.relname=ANY($1::text[])) AS "applicationTables"`, [dependencies.applicationTableNames]);
     const schemaState = schemaResult.rows[0];
+    const applicationTables = schemaState ? requireApplicationTableNames(schemaState.applicationTables) : undefined;
     await checkpoint('required schema validation', async () => {
       if (!schemaState) throw new Error('schema state unavailable');
       assertStagingRequiredSchemas({ public: schemaState.public, auth: schemaState.auth, storage: schemaState.storage, drizzle: schemaState.drizzle, supabaseMigrations: schemaState.supabaseMigrations });
@@ -674,7 +779,8 @@ export async function runSupabaseStagingDefaultPrivilegeDiagnostic(
     });
     await checkpoint('conflicting application baseline objects absence', async () => {
       if (!schemaState) throw new Error('schema state unavailable');
-      if (schemaState.applicationTables.length) throw new Error('application baseline objects exist');
+      if (!applicationTables) throw new Error('schema state unavailable');
+      if (applicationTables.length) throw new Error('application baseline objects exist');
     });
     stage = 'MIGRATION_HISTORY_FAILED';
     await checkpoint('migration-history eligibility', async () => {
@@ -1316,6 +1422,19 @@ export async function runPreflightCli(args = process.argv.slice(2), env = proces
   try {
     const dependencies = await loadStagingRunnerDependencies(openPostgresRuntime);
     return await runSupabaseStagingPreflight(args, env, {
+      ...dependencies,
+      open: openPostgresReadOnlyRuntime,
+    }, console.log);
+  } catch {
+    console.log(diagnostic('preflight', 'STATIC_CONFIGURATION_INVALID'));
+    return 2;
+  }
+}
+
+export async function runBaselineDiagnosticCli(args = process.argv.slice(2), env = process.env) {
+  try {
+    const dependencies = await loadStagingRunnerDependencies(openPostgresRuntime);
+    return await runSupabaseStagingBaselineDiagnostic(args, env, {
       ...dependencies,
       open: openPostgresReadOnlyRuntime,
     }, console.log);
