@@ -4,7 +4,7 @@ import heroImage from '../../assets/images/hero_rc_car_cinematic_1790434394611.j
 
 export const Hero = () => {
   return (
-    <section className="relative min-h-[560px] md:min-h-[640px] lg:min-h-[720px] flex flex-col justify-start overflow-hidden pt-10 sm:pt-12 md:pt-14 lg:pt-14 pb-10">
+    <section className="relative min-h-[560px] md:min-h-[640px] lg:min-h-[720px] flex flex-col justify-start overflow-hidden pt-36 sm:pt-36 md:pt-40 lg:pt-40 pb-10">
       {/* Background Image with Parallax */}
       <motion.div 
         className="absolute inset-0 z-0"
