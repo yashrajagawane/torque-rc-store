@@ -247,6 +247,27 @@ function diagnostic(mode: DiagnosticMode, stage: string) {
   return `[SUPABASE_STAGING_${stage}] ${subject} ${stage.toLowerCase().replaceAll('_', ' ')}; no credentials or database details are included.`;
 }
 
+function isAllowedApplicationPublicObject(
+  object: StagingCatalogState['publicObjects'][number],
+  tables: string[],
+  indexes: string[],
+  constraints: string[],
+  state: StagingCatalogState,
+): boolean {
+  if (object.extensionOwned || isApprovedSupabaseAutomaticRlsRoutine(state, object)) return true;
+  const permittedRelations = new Set([
+    ...tables,
+    ...tables.map((table) => `${table}_id_seq`),
+    ...tables.map((table) => `${table}_pkey`),
+    ...indexes,
+    ...constraints,
+  ]);
+  if (object.kind === 'relation') return permittedRelations.has(object.name);
+  // PostgreSQL creates one composite row type per table. These are
+  // application-owned objects, but only the exact table names are allowed.
+  return object.kind === 'type' && tables.includes(object.name);
+}
+
 function assertSchemaState(state: StagingCatalogState, expected: Pick<StagingRunnerDependencies,
   'expectedBaselineTables' | 'expectedBaselineColumns' | 'expectedBaselineIndexes' | 'expectedBaselineConstraints'
 > & { contactExpected: boolean; rlsExpected: boolean; current?: Pick<StagingRunnerDependencies, 'expectedCurrentTables' | 'expectedCurrentColumns' | 'expectedCurrentIndexes' | 'expectedCurrentConstraints'> }) {
@@ -257,16 +278,7 @@ function assertSchemaState(state: StagingCatalogState, expected: Pick<StagingRun
   const actualTables = new Set(state.applicationTables);
   if (tables.some((table) => !actualTables.has(table))) throw new Error('schema tables mismatch');
   if (actualTables.has('contact_inquiries') !== expected.contactExpected) throw new Error('contact table mismatch');
-  const permittedObjects = new Set([
-    ...tables,
-    ...tables.map((table) => `${table}_id_seq`),
-    ...tables.map((table) => `${table}_pkey`),
-    ...indexes,
-    ...constraints,
-  ]);
-  if (state.publicObjects.some((object) => !object.extensionOwned
-    && !isApprovedSupabaseAutomaticRlsRoutine(state, object)
-    && (object.kind !== 'relation' || !permittedObjects.has(object.name)))) {
+  if (state.publicObjects.some((object) => !isAllowedApplicationPublicObject(object, tables, indexes, constraints, state))) {
     throw new Error('public schema contains unexpected objects');
   }
   const actualRls = new Set(state.applicationRlsTables);
@@ -539,16 +551,13 @@ export async function runSupabaseStagingBaselineDiagnostic(
         || !state.drizzleRelations.includes('__drizzle_migrations_id_seq')) throw new Error('Drizzle metadata mismatch');
     });
     check('public object validation', () => {
-      const permitted = new Set([
-        ...dependencies.expectedBaselineTables,
-        ...dependencies.expectedBaselineTables.map((table) => `${table}_id_seq`),
-        ...dependencies.expectedBaselineTables.map((table) => `${table}_pkey`),
-        ...dependencies.expectedBaselineIndexes,
-        ...dependencies.expectedBaselineConstraints,
-      ]);
-      if (state.publicObjects.some((object) => !object.extensionOwned
-        && !isApprovedSupabaseAutomaticRlsRoutine(state, object)
-        && (object.kind !== 'relation' || !permitted.has(object.name)))) throw new Error('unexpected public object');
+      if (state.publicObjects.some((object) => !isAllowedApplicationPublicObject(
+        object,
+        dependencies.expectedBaselineTables,
+        dependencies.expectedBaselineIndexes,
+        dependencies.expectedBaselineConstraints,
+        state,
+      ))) throw new Error('unexpected public object');
     });
     report(failures === 0
       ? 'BASELINE DIAGNOSTIC PASSED; no schema changes, migrations, or repairs were performed.'

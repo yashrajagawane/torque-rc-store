@@ -805,7 +805,10 @@ describe('Supabase staging initialization guard', () => {
 
   it('verifies an initialized baseline through read-only checkpoints without invoking mutations', async () => {
     const deps = await loadStagingRunnerDependencies(async () => { throw new Error('unused'); });
-    const current = state(deps);
+    const current = { ...state(deps), publicObjects: [
+      ...state(deps).publicObjects,
+      ...deps.expectedBaselineTables.map((name) => ({ name, kind: 'type', extensionOwned: false })),
+    ] };
     let mutationCalled = false;
     const lines: string[] = [];
     const code = await runSupabaseStagingBaselineDiagnostic(['--confirm-staging-preflight'], baseEnv, {
@@ -835,6 +838,22 @@ describe('Supabase staging initialization guard', () => {
     assert.equal(code, 1);
     assert.ok(lines.some((line) => line.includes('FAIL baseline RLS validation')));
     assert.ok(lines.some((line) => line.includes('BASELINE DIAGNOSTIC FAILED')));
+  });
+
+  it('rejects unexpected custom types, routines, and relations while allowing table row types', async () => {
+    const deps = await loadStagingRunnerDependencies(async () => { throw new Error('unused'); });
+    const invalid = { ...state(deps), publicObjects: [
+      ...state(deps).publicObjects,
+      ...deps.expectedBaselineTables.map((name) => ({ name, kind: 'type', extensionOwned: false })),
+      { name: 'custom_type', kind: 'type', extensionOwned: false },
+    ] };
+    const lines: string[] = [];
+    const code = await runSupabaseStagingBaselineDiagnostic(['--confirm-staging-preflight'], baseEnv, {
+      ...deps,
+      open: async () => ({ inspect: async () => invalid, applyBaseline: async () => assert.fail('must not mutate'), applyForwardMigrations: async () => assert.fail('must not migrate'), close: async () => undefined }),
+    }, (line) => lines.push(line));
+    assert.equal(code, 1);
+    assert.ok(lines.some((line) => line.includes('FAIL public object validation')));
   });
 
   it('fails verification if baseline execution changes the recognized automatic-RLS catalog state', async () => {
