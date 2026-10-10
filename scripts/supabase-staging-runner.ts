@@ -293,7 +293,7 @@ export async function runSupabaseStagingPreflight(
         && noCurrentAppAcl && noGlobalDefaults && noSchemaDefaults;
       report(`API role ${safeName(role.role)}: isolation_predicate=${roleIsolation}; inherits_runtime_owner=${role.inheritsRuntimeOwner}; owner_membership_path=${role.memberOfRuntimeOwner}; superuser=${role.superuser}; bypass_rls=${role.bypassRls}; public_usage=${role.publicUsage}(informational); public_create_absent=${!role.publicCreate}; auth_usage=${role.authUsage}(informational); auth_create_absent=${!role.authCreate}; storage_usage=${role.storageUsage}(informational); storage_create_absent=${!role.storageCreate}; drizzle_usage=${role.drizzleUsage}(informational); drizzle_create_absent=${!role.drizzleCreate}; effective_app_table_privileges_absent=${noEffectiveAppTableGrants}(count=${role.applicationTablePrivileges.length}); effective_app_column_privileges_absent=${noEffectiveAppColumnGrants}(count=${role.applicationColumnPrivileges.length}); effective_app_sequence_privileges_absent=${noEffectiveAppSequenceGrants}(count=${role.applicationSequencePrivileges.length}); current_public_anon_authenticated_acl_absent=${noCurrentAppAcl}(table=${role.directApplicationTableAcl.length},column=${role.directApplicationColumnAcl.length},sequence=${role.directApplicationSequenceAcl.length}); global_default_table_and_sequence_privileges_absent=${noGlobalDefaults}(table=${role.globalDefaultTablePrivileges.length},sequence=${role.globalDefaultSequencePrivileges.length}); public_default_table_and_sequence_privileges_absent=${noSchemaDefaults}(table=${role.schemaDefaultTablePrivileges.length},sequence=${role.schemaDefaultSequencePrivileges.length}).`);
     }
-    report(`Privilege audit context: roles=${state.dataApiRoleAudit?.length ?? 0}; runtime_role_equals_migration_owner=true; no_application_tables=${state.applicationTables.length === 0}; ordinary_schema_usage_is_informational=true; no_existing_application_grants=${(state.dataApiRoleAudit ?? []).every((role) => role.applicationTablePrivileges.length === 0 && role.applicationColumnPrivileges.length === 0 && role.applicationSequencePrivileges.length === 0)}.`);
+    report(`Privilege audit context: roles=${state.dataApiRoleAudit?.length ?? 0}; configured_runtime_role_equals_expected_migration_role=true; no_application_tables=${state.applicationTables.length === 0}; ordinary_schema_usage_is_informational=true; no_existing_application_grants=${(state.dataApiRoleAudit ?? []).every((role) => role.applicationTablePrivileges.length === 0 && role.applicationColumnPrivileges.length === 0 && role.applicationSequencePrivileges.length === 0)}.`);
     report(`Application tables: ${state.applicationTables.map(safeName).join(', ') || 'none'} (count=${state.applicationTables.length}); RLS tables=${state.applicationRlsTables.map(safeName).join(', ') || 'none'}; policies=${state.applicationPolicies.map(safeName).join(', ') || 'none'}.`);
     report(`Drizzle history: ${state.migrationHistory.length ? state.migrationHistory.map((row) => `${row.createdAt}:${safeName(row.hash)}`).join(', ') : 'absent'}.`);
     report(`Supabase CLI migration history: schema=${state.supabaseMigrationSchemaExists ? 'present' : 'absent'}, records=${state.supabaseMigrationRecords}${state.supabaseMigrationEntries?.length ? `, entries=${state.supabaseMigrationEntries.map(safeName).join(',')}` : ''}.`);
@@ -734,12 +734,14 @@ export async function openPostgresRuntime(settings: StagingDatabaseSettings, rea
                ORDER BY app.table_name, privilege.privilege
              ) AS "applicationColumnPrivileges",
              ARRAY(
-               SELECT format('%s:%s', app.table_name || '_id_seq', privilege.privilege)
-               FROM unnest($2::text[]) AS app(table_name)
-               CROSS JOIN unnest(ARRAY['USAGE','SELECT','UPDATE']::text[]) AS privilege(privilege)
-               JOIN pg_class seq ON seq.relname = app.table_name || '_id_seq' AND seq.relkind = 'S'
+               SELECT format('%s:%s', seq.relname, privilege.privilege)
+               FROM pg_class seq
                JOIN pg_namespace seqns ON seqns.oid = seq.relnamespace AND seqns.nspname = 'public'
-               WHERE has_sequence_privilege(r.oid, seq.oid, privilege.privilege)
+               JOIN pg_depend dep ON dep.classid = 'pg_class'::regclass AND dep.objid = seq.oid
+                 AND dep.refclassid = 'pg_class'::regclass AND dep.deptype IN ('a','i')
+               JOIN pg_class app ON app.oid = dep.refobjid AND app.relname = ANY($2::text[])
+               CROSS JOIN unnest(ARRAY['USAGE','SELECT','UPDATE']::text[]) AS privilege(privilege)
+               WHERE seq.relkind = 'S' AND has_sequence_privilege(r.oid, seq.oid, privilege.privilege)
                ORDER BY seq.relname, privilege.privilege
              ) AS "applicationSequencePrivileges",
              ARRAY(
@@ -765,12 +767,14 @@ export async function openPostgresRuntime(settings: StagingDatabaseSettings, rea
              ) AS "directApplicationColumnAcl",
              ARRAY(
                SELECT format('%s:%s:%s', seq.relname, CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END, acl.privilege_type)
-               FROM unnest($2::text[]) AS app(table_name)
-               JOIN pg_class seq ON seq.relname = app.table_name || '_id_seq' AND seq.relkind = 'S'
+               FROM pg_class seq
+               JOIN pg_depend dep ON dep.classid = 'pg_class'::regclass AND dep.objid = seq.oid
+                 AND dep.refclassid = 'pg_class'::regclass AND dep.deptype IN ('a','i')
+               JOIN pg_class app ON app.oid = dep.refobjid AND app.relname = ANY($2::text[])
                JOIN pg_namespace n ON n.oid = seq.relnamespace AND n.nspname = 'public'
                CROSS JOIN LATERAL aclexplode(COALESCE(seq.relacl, acldefault('S', seq.relowner))) acl
                LEFT JOIN pg_roles grantee ON grantee.oid = acl.grantee
-               WHERE acl.grantee = 0 OR acl.grantee = r.oid
+               WHERE seq.relkind = 'S' AND (acl.grantee = 0 OR acl.grantee = r.oid)
                ORDER BY seq.relname, CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END, acl.privilege_type
              ) AS "directApplicationSequenceAcl",
              ARRAY(

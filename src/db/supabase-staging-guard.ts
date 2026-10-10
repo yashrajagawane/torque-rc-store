@@ -428,7 +428,7 @@ export function assertStagingRequiredSchemas(schemas: StagingCatalogState['schem
 export function assertStagingDataApiPrivileges(state: Pick<StagingCatalogState, 'dataApiRoleAudit'>): void {
   const auditedRoles = state.dataApiRoleAudit?.map((role) => role.role).sort();
   if (!auditedRoles || JSON.stringify(auditedRoles) !== JSON.stringify(['anon', 'authenticated'])
-    || state.dataApiRoleAudit.some((role) => role.superuser || role.bypassRls || role.inheritsRuntimeOwner || role.memberOfRuntimeOwner
+    || (state.dataApiRoleAudit ?? []).some((role) => role.superuser || role.bypassRls || role.inheritsRuntimeOwner || role.memberOfRuntimeOwner
       || role.publicCreate || role.drizzleCreate || role.applicationTablePrivileges.length > 0
       || role.applicationColumnPrivileges.length > 0 || role.authCreate || role.storageCreate || role.applicationSequencePrivileges.length > 0
       || role.directApplicationTableAcl.length > 0 || role.directApplicationColumnAcl.length > 0 || role.directApplicationSequenceAcl.length > 0
