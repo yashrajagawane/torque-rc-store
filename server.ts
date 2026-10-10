@@ -182,11 +182,29 @@ if (process.env.NODE_ENV === 'production') {
   // Vercel packages the generated public tree with the Express function. Serve
   // it from the function so hashed JS/CSS assets are returned with their real
   // MIME types; standalone Node continues to serve Vite's dist directory.
-  app.use(express.static(path.join(__dirname, process.env.VERCEL === '1' ? 'public' : 'dist')));
+  const frontendRoot = path.join(__dirname, process.env.VERCEL === '1' ? 'public' : 'dist');
+  app.use(express.static(frontendRoot, {
+    // The HTML shell contains the current hashed asset filenames. Revalidate it
+    // on every navigation so a browser never keeps an old shell pointing at a
+    // bundle that is no longer deployed.
+    setHeaders: (res, filePath) => {
+      if (path.basename(filePath) === 'index.html') {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        return;
+      }
+
+      // Vite adds content hashes to these filenames, so they are safe to cache
+      // for a long time and do not need to be re-fetched after a deployment.
+      if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      }
+    },
+  }));
   app.get('*', (req, res) => {
     const indexPath = process.env.VERCEL === '1'
       ? path.join(__dirname, 'public', 'index.html')
       : path.join(__dirname, 'dist', 'index.html');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.sendFile(indexPath);
   });
 } else {
