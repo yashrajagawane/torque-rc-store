@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { PoolClient } from 'pg';
 import { getTableConfig } from 'drizzle-orm/pg-core';
 import * as schema from '../src/db/schema.ts';
 import {
@@ -15,6 +16,7 @@ import {
   assertSupabaseAutomaticRlsConfiguration,
   assertSupabaseAutomaticRlsUnchanged,
   isApprovedSupabaseAutomaticRlsRoutine,
+  supabaseAutomaticRlsDiagnostics,
   normalizeStagingSqlType,
   resolveSupabaseStagingSettings,
   type MigrationJournalEntry,
@@ -52,6 +54,57 @@ export type StagingPreflightRuntime = Pick<StagingRuntime, 'inspect' | 'close'>;
 export type StagingPreflightDependencies = Omit<StagingRunnerDependencies, 'open'> & {
   open: (settings: StagingDatabaseSettings) => Promise<StagingPreflightRuntime>;
 };
+
+export class StagingReadOnlyTransactionError extends Error {
+  readonly category = 'READ_ONLY_TRANSACTION_REQUIRED';
+  constructor() { super('PostgreSQL did not confirm an explicit read-only transaction.'); }
+}
+
+type ReadOnlyClient = {
+  query: (sql: string) => Promise<{ rows: Array<{ transaction_read_only?: unknown }> }>;
+  release: (discard?: boolean) => void;
+};
+
+/** Starts and verifies READ ONLY on one checked-out connection; it never accepts arbitrary SQL. */
+export async function beginVerifiedReadOnlyTransaction(client: ReadOnlyClient): Promise<void> {
+  await client.query('BEGIN READ ONLY');
+  const result = await client.query("SELECT current_setting('transaction_read_only') AS transaction_read_only");
+  const status = result.rows[0]?.transaction_read_only;
+  if (!(status === true || (typeof status === 'string' && ['on', 'true'].includes(status.toLowerCase())))) {
+    throw new StagingReadOnlyTransactionError();
+  }
+}
+
+export async function openVerifiedReadOnlySession<Client extends ReadOnlyClient>(pool: {
+  connect: () => Promise<Client>;
+  end: () => Promise<void>;
+}): Promise<{ client: Client; close: () => Promise<void> }> {
+  let client: Client | undefined;
+  try {
+    client = await pool.connect();
+    await beginVerifiedReadOnlyTransaction(client);
+  } catch (error) {
+    if (client) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      client.release(true);
+    }
+    await pool.end().catch(() => undefined);
+    throw error;
+  }
+  let closed = false;
+  return {
+    client,
+    close: async () => {
+      if (closed) return;
+      closed = true;
+      let closeError: unknown;
+      try { await client!.query('ROLLBACK'); } catch (error) { closeError = error; }
+      client!.release(closeError !== undefined);
+      try { await pool.end(); } catch (error) { closeError ??= error; }
+      if (closeError) throw closeError;
+    },
+  };
+}
 
 const declaredApplicationTables = [
   schema.brands, schema.cartItems, schema.cartMergeOperations, schema.categories, schema.inventoryReservations,
@@ -189,7 +242,15 @@ export async function runSupabaseStagingPreflight(
   };
   try {
     report('PASS explicit staging configuration and target fingerprint validated.');
-    runtime = await dependencies.open(settings);
+    try {
+      runtime = await dependencies.open(settings);
+    } catch (error) {
+      if (error instanceof StagingReadOnlyTransactionError) {
+        report(diagnostic('preflight', error.category));
+        return 1;
+      }
+      throw error;
+    }
     const state = await runtime.inspect();
     let identityValid = true;
     try {
@@ -208,19 +269,37 @@ export async function runSupabaseStagingPreflight(
     report(`Schemas: public=${state.schemas.public ? 'present' : 'absent'}, auth=${state.schemas.auth ? 'present' : 'absent'}, storage=${state.schemas.storage ? 'present' : 'absent'}, drizzle=${state.schemas.drizzle ? 'present' : 'absent'}, supabase_migrations=${state.schemas.supabaseMigrations ? 'present' : 'absent'}.`);
     report(`Public objects: ${state.publicObjects.length ? state.publicObjects.map((object) => `${safeName(object.kind)}:${safeName(object.name)}${object.extensionOwned ? '[extension]' : ''}`).join(', ') : 'none'}.`);
     report(`Drizzle objects: ${state.drizzleObjects.length ? state.drizzleObjects.map((object) => `${safeName(object.kind)}:${safeName(object.name)}`).join(', ') : 'none'}.`);
-    const automatic = state.supabaseAutomaticRlsFunctions[0];
-    const eventTrigger = state.eventTriggers[0];
-    report(`Automatic RLS: function=${automatic ? `${safeName(automatic.schema)}.${safeName(automatic.name)} owner=${safeName(automatic.owner)} language=${safeName(automatic.language)} result=${safeName(automatic.returnType)} security_definer=${automatic.securityDefiner} strict=${automatic.strict} volatility=${safeName(automatic.volatility)} source_length=${automatic.sourceLength} source_md5=${safeDigest(automatic.sourceMd5)}` : 'absent'}; event_trigger=${eventTrigger ? `${safeName(eventTrigger.name)} owner=${safeName(eventTrigger.owner)} enabled=${safeName(eventTrigger.enabled)} event=${safeName(eventTrigger.event)} tags=${(eventTrigger.tags ?? []).map(safeName).join('|')} handler=${safeName(eventTrigger.handlerSchema)}.${safeName(eventTrigger.handlerName)}()` : 'absent'}.`);
+    const automatic = state.supabaseAutomaticRlsFunctions.length === 1 ? state.supabaseAutomaticRlsFunctions[0] : undefined;
+    const eventTrigger = state.eventTriggers.find((trigger) => trigger.name === 'ensure_rls');
+    const autoRlsChecks = supabaseAutomaticRlsDiagnostics(state);
+    report(`Automatic RLS property checks: ${Object.entries(autoRlsChecks).map(([name, valid]) => `${name}=${valid}`).join(', ')}.`);
+    report(`Automatic RLS observed safe metadata: function=${automatic ? `${safeName(automatic.schema)}.${safeName(automatic.name)} owner=${safeName(automatic.owner)} language=${safeName(automatic.language)} result=${safeName(automatic.returnType)} security_definer=${automatic.securityDefiner} strict=${automatic.strict} volatility=${safeName(automatic.volatility)} source_length=${automatic.sourceLength} source_md5=${safeDigest(automatic.sourceMd5)}` : 'absent'}; event_trigger=${eventTrigger ? `${safeName(eventTrigger.name)} owner=${safeName(eventTrigger.owner)} enabled=${safeName(eventTrigger.enabled)} event=${safeName(eventTrigger.event)} tags_match=${autoRlsChecks.trigger_event_tag_set_matches} handler_match=${autoRlsChecks.trigger_handler_matches}` : 'absent'}; event_trigger_count=${state.eventTriggers.length}.`);
     report(`API roles: ${state.dataApiRoles.map(safeName).join(', ') || 'none'}.`);
+    report(`API role existence: anon=${state.dataApiRoles.includes('anon')}; authenticated=${state.dataApiRoles.includes('authenticated')}.`);
+    report(`API role audit completeness: expected_exactly_once=${state.dataApiRoleAudit?.length === 2
+      && state.dataApiRoleAudit.filter((role) => role.role === 'anon').length === 1
+      && state.dataApiRoleAudit.filter((role) => role.role === 'authenticated').length === 1}.`);
     for (const role of state.dataApiRoleAudit ?? []) {
-      report(`API role ${safeName(role.role)}: inherits_owner=${role.inheritsRuntimeOwner}; superuser=${role.superuser}; bypass_rls=${role.bypassRls}; public_usage=${role.publicUsage}; public_create=${role.publicCreate}; auth_usage=${role.authUsage}; auth_create=${role.authCreate}; storage_usage=${role.storageUsage}; storage_create=${role.storageCreate}; drizzle_usage=${role.drizzleUsage}; drizzle_create=${role.drizzleCreate}; table_privileges=${role.applicationTablePrivileges.map(safeName).join('|') || 'none'}; sequence_privileges=${role.applicationSequencePrivileges.map(safeName).join('|') || 'none'}.`);
+      const noEffectiveAppTableGrants = role.applicationTablePrivileges.length === 0;
+      const noEffectiveAppColumnGrants = role.applicationColumnPrivileges.length === 0;
+      const noEffectiveAppSequenceGrants = role.applicationSequencePrivileges.length === 0;
+      const noCurrentAppAcl = role.directApplicationTableAcl.length === 0
+        && role.directApplicationColumnAcl.length === 0 && role.directApplicationSequenceAcl.length === 0;
+      const noGlobalDefaults = role.globalDefaultTablePrivileges.length === 0 && role.globalDefaultSequencePrivileges.length === 0;
+      const noSchemaDefaults = role.schemaDefaultTablePrivileges.length === 0 && role.schemaDefaultSequencePrivileges.length === 0;
+      const roleIsolation = !role.inheritsRuntimeOwner && !role.memberOfRuntimeOwner && !role.superuser && !role.bypassRls
+        && !role.publicCreate && !role.drizzleCreate && !role.authCreate && !role.storageCreate
+        && noEffectiveAppTableGrants && noEffectiveAppColumnGrants && noEffectiveAppSequenceGrants
+        && noCurrentAppAcl && noGlobalDefaults && noSchemaDefaults;
+      report(`API role ${safeName(role.role)}: isolation_predicate=${roleIsolation}; inherits_runtime_owner=${role.inheritsRuntimeOwner}; owner_membership_path=${role.memberOfRuntimeOwner}; superuser=${role.superuser}; bypass_rls=${role.bypassRls}; public_usage=${role.publicUsage}(informational); public_create_absent=${!role.publicCreate}; auth_usage=${role.authUsage}(informational); auth_create_absent=${!role.authCreate}; storage_usage=${role.storageUsage}(informational); storage_create_absent=${!role.storageCreate}; drizzle_usage=${role.drizzleUsage}(informational); drizzle_create_absent=${!role.drizzleCreate}; effective_app_table_privileges_absent=${noEffectiveAppTableGrants}(count=${role.applicationTablePrivileges.length}); effective_app_column_privileges_absent=${noEffectiveAppColumnGrants}(count=${role.applicationColumnPrivileges.length}); effective_app_sequence_privileges_absent=${noEffectiveAppSequenceGrants}(count=${role.applicationSequencePrivileges.length}); current_public_anon_authenticated_acl_absent=${noCurrentAppAcl}(table=${role.directApplicationTableAcl.length},column=${role.directApplicationColumnAcl.length},sequence=${role.directApplicationSequenceAcl.length}); global_default_table_and_sequence_privileges_absent=${noGlobalDefaults}(table=${role.globalDefaultTablePrivileges.length},sequence=${role.globalDefaultSequencePrivileges.length}); public_default_table_and_sequence_privileges_absent=${noSchemaDefaults}(table=${role.schemaDefaultTablePrivileges.length},sequence=${role.schemaDefaultSequencePrivileges.length}).`);
     }
-    report(`Application tables: ${state.applicationTables.map(safeName).join(', ') || 'none'}; RLS tables=${state.applicationRlsTables.map(safeName).join(', ') || 'none'}; policies=${state.applicationPolicies.map(safeName).join(', ') || 'none'}.`);
+    report(`Privilege audit context: roles=${state.dataApiRoleAudit?.length ?? 0}; runtime_role_equals_migration_owner=true; no_application_tables=${state.applicationTables.length === 0}; ordinary_schema_usage_is_informational=true; no_existing_application_grants=${(state.dataApiRoleAudit ?? []).every((role) => role.applicationTablePrivileges.length === 0 && role.applicationColumnPrivileges.length === 0 && role.applicationSequencePrivileges.length === 0)}.`);
+    report(`Application tables: ${state.applicationTables.map(safeName).join(', ') || 'none'} (count=${state.applicationTables.length}); RLS tables=${state.applicationRlsTables.map(safeName).join(', ') || 'none'}; policies=${state.applicationPolicies.map(safeName).join(', ') || 'none'}.`);
     report(`Drizzle history: ${state.migrationHistory.length ? state.migrationHistory.map((row) => `${row.createdAt}:${safeName(row.hash)}`).join(', ') : 'absent'}.`);
     report(`Supabase CLI migration history: schema=${state.supabaseMigrationSchemaExists ? 'present' : 'absent'}, records=${state.supabaseMigrationRecords}${state.supabaseMigrationEntries?.length ? `, entries=${state.supabaseMigrationEntries.map(safeName).join(',')}` : ''}.`);
 
     check('required Supabase schemas', () => assertStagingRequiredSchemas(state.schemas));
-    check('database session is read-only', () => { if (state.identity.transactionReadOnly !== true) throw new Error('read-only session setting absent'); });
+    check('database transaction is explicitly read-only', () => { if (state.identity.transactionReadOnly !== true) throw new Error('read-only transaction setting absent'); });
     check('exact automatic-RLS function and event trigger', () => assertSupabaseAutomaticRlsConfiguration(state));
     check('required Data API roles', () => assertStagingDataApiRoles(state.dataApiRoles));
     check('Data API privilege isolation from runtime/migration owner and application tables', () => assertStagingDataApiPrivileges(state));
@@ -499,18 +578,24 @@ export async function openPostgresRuntime(settings: StagingDatabaseSettings, rea
     max: 1,
     connectionTimeoutMillis: 5000,
     statement_timeout: 8000,
-    options: readOnly ? '-c search_path=public -c default_transaction_read_only=on' : '-c search_path=public',
+    options: '-c search_path=public',
     application_name: 'flyrc-supabase-staging-schema-task',
   });
+  let inspectionClient: PoolClient | undefined;
+  let readOnlySession: Awaited<ReturnType<typeof openVerifiedReadOnlySession<PoolClient>>> | undefined;
   try {
-    await pool.query('SELECT 1');
+    if (readOnly) {
+      readOnlySession = await openVerifiedReadOnlySession(pool);
+      inspectionClient = readOnlySession.client;
+    } else await pool.query('SELECT 1');
   } catch (error) {
-    await pool.end().catch(() => undefined);
+    if (!readOnly) await pool.end().catch(() => undefined);
     throw error;
   }
+  const catalogConnection = inspectionClient ?? pool;
 
   const inspect = async (): Promise<StagingCatalogState> => {
-    const identityResult = await pool.query<{
+    const identityResult = await catalogConnection.query<{
       database: string; login_user: string; user: string; current_schema: string; search_path: string; server_port: number; transaction_read_only: boolean;
     }>(`SELECT current_database() AS database, session_user AS login_user, current_user AS user, current_schema() AS current_schema,
                current_setting('search_path') AS search_path, inet_server_port() AS server_port,
@@ -575,12 +660,12 @@ export async function openPostgresRuntime(settings: StagingDatabaseSettings, rea
         EXISTS (SELECT 1 FROM pg_depend dep WHERE dep.classid = 'pg_statistic_ext'::regclass AND dep.objid = s.oid AND dep.deptype = 'e') AS "extensionOwned"
       FROM pg_statistic_ext s JOIN pg_namespace n ON n.oid = s.stxnamespace WHERE n.nspname = 'public'
     `;
-    const publicObjectResult = await pool.query<{ name: string; kind: string; extensionOwned: boolean }>(objectInventoryQuery);
-    const drizzleObjectResult = await pool.query<{ name: string; kind: string; extensionOwned: boolean }>(
+    const publicObjectResult = await catalogConnection.query<{ name: string; kind: string; extensionOwned: boolean }>(objectInventoryQuery);
+    const drizzleObjectResult = await catalogConnection.query<{ name: string; kind: string; extensionOwned: boolean }>(
       objectInventoryQuery.replaceAll("n.nspname = 'public'", "n.nspname = 'drizzle'"),
     );
-    const automaticRlsFunctionResult = await pool.query<StagingCatalogState['supabaseAutomaticRlsFunctions'][number]>(`
-      SELECT n.nspname AS schema, p.proname AS name, p.pronargs::integer AS "argumentCount",
+    const automaticRlsFunctionResult = await catalogConnection.query<StagingCatalogState['supabaseAutomaticRlsFunctions'][number]>(`
+      SELECT n.nspname AS schema, p.proname AS name, p.oid::text AS "objectId", p.pronargs::integer AS "argumentCount",
              pg_get_function_identity_arguments(p.oid) AS "identityArguments",
              pg_get_userbyid(p.proowner) AS owner, l.lanname AS language,
              pg_get_function_result(p.oid) AS "returnType", p.prosecdef AS "securityDefiner",
@@ -591,35 +676,37 @@ export async function openPostgresRuntime(settings: StagingDatabaseSettings, rea
       JOIN pg_language l ON l.oid = p.prolang
       WHERE n.nspname = 'public' AND p.proname = 'rls_auto_enable'
     `);
-    const eventTriggerResult = await pool.query<StagingCatalogState['eventTriggers'][number]>(`
+    const eventTriggerResult = await catalogConnection.query<StagingCatalogState['eventTriggers'][number]>(`
       SELECT e.evtname AS name, pg_get_userbyid(e.evtowner) AS owner, e.evtenabled AS enabled,
              e.evtevent AS event, e.evttags AS tags, hn.nspname AS "handlerSchema",
-             hp.proname AS "handlerName", hp.pronargs::integer AS "handlerArgumentCount"
+             hp.proname AS "handlerName", hp.pronargs::integer AS "handlerArgumentCount",
+             hp.oid::text AS "handlerObjectId"
       FROM pg_event_trigger e
       JOIN pg_proc hp ON hp.oid = e.evtfoid
       JOIN pg_namespace hn ON hn.oid = hp.pronamespace
       ORDER BY e.evtname
     `);
-    const drizzleSchema = await pool.query<{ exists: boolean }>(`SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = 'drizzle') AS exists`);
-    const schemaRows = await pool.query<{ schema_name: string }>(`
+    const drizzleSchema = await catalogConnection.query<{ exists: boolean }>(`SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = 'drizzle') AS exists`);
+    const schemaRows = await catalogConnection.query<{ schema_name: string }>(`
       SELECT nspname AS schema_name FROM pg_namespace
       WHERE nspname = ANY($1::text[]) ORDER BY nspname
     `, [['public', 'auth', 'storage', 'drizzle', 'supabase_migrations']]);
-    const drizzleRelations = await pool.query<{ relname: string }>(`
+    const drizzleRelations = await catalogConnection.query<{ relname: string }>(`
       SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname = 'drizzle' AND c.relkind IN ('r','p','v','m','S','f') ORDER BY c.relname
     `);
-    const historyExists = await pool.query<{ exists: boolean }>(`SELECT to_regclass('drizzle.__drizzle_migrations') IS NOT NULL AS exists`);
+    const historyExists = await catalogConnection.query<{ exists: boolean }>(`SELECT to_regclass('drizzle.__drizzle_migrations') IS NOT NULL AS exists`);
     let migrationHistory: StagingCatalogState['migrationHistory'] = [];
     if (historyExists.rows[0]?.exists) {
-      const rows = await pool.query<{ hash: string; created_at: string }>(`SELECT hash, created_at::text AS created_at FROM drizzle.__drizzle_migrations ORDER BY created_at, id`);
+      const rows = await catalogConnection.query<{ hash: string; created_at: string }>(`SELECT hash, created_at::text AS created_at FROM drizzle.__drizzle_migrations ORDER BY created_at, id`);
       migrationHistory = rows.rows.map((row) => ({ hash: row.hash, createdAt: Number(row.created_at) }));
     }
-    const supabaseSchema = await pool.query<{ exists: boolean }>(`SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = 'supabase_migrations') AS exists`);
-    const dataApiRoles = await pool.query<{ rolname: string }>(`SELECT rolname FROM pg_roles WHERE rolname IN ('anon', 'authenticated') ORDER BY rolname`);
-    const dataApiRoleAudit = await pool.query<NonNullable<StagingCatalogState['dataApiRoleAudit']>[number]>(`
+    const supabaseSchema = await catalogConnection.query<{ exists: boolean }>(`SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = 'supabase_migrations') AS exists`);
+    const dataApiRoles = await catalogConnection.query<{ rolname: string }>(`SELECT rolname FROM pg_roles WHERE rolname IN ('anon', 'authenticated') ORDER BY rolname`);
+    const dataApiRoleAudit = await catalogConnection.query<NonNullable<StagingCatalogState['dataApiRoleAudit']>[number]>(`
       SELECT r.rolname AS role, r.rolsuper AS superuser, r.rolbypassrls AS "bypassRls",
-             pg_has_role(r.rolname, $1, 'MEMBER') AS "inheritsRuntimeOwner",
+             pg_has_role(r.rolname, $1, 'USAGE') AS "inheritsRuntimeOwner",
+             pg_has_role(r.rolname, $1, 'MEMBER') AS "memberOfRuntimeOwner",
              has_schema_privilege(r.rolname, 'public', 'USAGE') AS "publicUsage",
              has_schema_privilege(r.rolname, 'public', 'CREATE') AS "publicCreate",
              CASE WHEN EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth') THEN has_schema_privilege(r.rolname, 'auth', 'USAGE') ELSE false END AS "authUsage",
@@ -635,47 +722,120 @@ export async function openPostgresRuntime(settings: StagingDatabaseSettings, rea
                FROM unnest($2::text[]) AS app(table_name)
                CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']::text[]) AS privilege(privilege)
                WHERE to_regclass(format('public.%I', app.table_name)) IS NOT NULL
-                 AND (has_table_privilege(r.rolname, format('public.%I', app.table_name), privilege.privilege)
-                   OR (privilege.privilege IN ('SELECT','INSERT','UPDATE','REFERENCES')
-                     AND has_any_column_privilege(r.rolname, format('public.%I', app.table_name), privilege.privilege)))
+                 AND has_table_privilege(r.rolname, format('public.%I', app.table_name), privilege.privilege)
                ORDER BY app.table_name, privilege.privilege
              ) AS "applicationTablePrivileges",
+             ARRAY(
+               SELECT format('%s:%s', app.table_name, privilege.privilege)
+               FROM unnest($2::text[]) AS app(table_name)
+               CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']::text[]) AS privilege(privilege)
+               WHERE to_regclass(format('public.%I', app.table_name)) IS NOT NULL
+                 AND has_any_column_privilege(r.rolname, format('public.%I', app.table_name), privilege.privilege)
+               ORDER BY app.table_name, privilege.privilege
+             ) AS "applicationColumnPrivileges",
              ARRAY(
                SELECT format('%s:%s', app.table_name || '_id_seq', privilege.privilege)
                FROM unnest($2::text[]) AS app(table_name)
                CROSS JOIN unnest(ARRAY['USAGE','SELECT','UPDATE']::text[]) AS privilege(privilege)
-               WHERE to_regclass(format('public.%I', app.table_name || '_id_seq')) IS NOT NULL
-                 AND has_sequence_privilege(r.rolname, format('public.%I', app.table_name || '_id_seq'), privilege.privilege)
-               ORDER BY app.table_name, privilege.privilege
-             ) AS "applicationSequencePrivileges"
+               JOIN pg_class seq ON seq.relname = app.table_name || '_id_seq' AND seq.relkind = 'S'
+               JOIN pg_namespace seqns ON seqns.oid = seq.relnamespace AND seqns.nspname = 'public'
+               WHERE has_sequence_privilege(r.oid, seq.oid, privilege.privilege)
+               ORDER BY seq.relname, privilege.privilege
+             ) AS "applicationSequencePrivileges",
+             ARRAY(
+               SELECT format('%s:%s:%s', c.relname, CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END, acl.privilege_type)
+               FROM unnest($2::text[]) AS app(table_name)
+               JOIN pg_class c ON c.relname = app.table_name AND c.relkind IN ('r','p')
+               JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
+               CROSS JOIN LATERAL aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner))) acl
+               LEFT JOIN pg_roles grantee ON grantee.oid = acl.grantee
+               WHERE acl.grantee = 0 OR acl.grantee = r.oid
+               ORDER BY c.relname, CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END, acl.privilege_type
+             ) AS "directApplicationTableAcl",
+             ARRAY(
+               SELECT format('%s.%s:%s:%s', c.relname, a.attname, CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END, acl.privilege_type)
+               FROM unnest($2::text[]) AS app(table_name)
+               JOIN pg_class c ON c.relname = app.table_name AND c.relkind IN ('r','p')
+               JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
+               JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped AND a.attacl IS NOT NULL
+               CROSS JOIN LATERAL aclexplode(a.attacl) acl
+               LEFT JOIN pg_roles grantee ON grantee.oid = acl.grantee
+               WHERE acl.grantee = 0 OR acl.grantee = r.oid
+               ORDER BY c.relname, a.attname, CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END, acl.privilege_type
+             ) AS "directApplicationColumnAcl",
+             ARRAY(
+               SELECT format('%s:%s:%s', seq.relname, CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END, acl.privilege_type)
+               FROM unnest($2::text[]) AS app(table_name)
+               JOIN pg_class seq ON seq.relname = app.table_name || '_id_seq' AND seq.relkind = 'S'
+               JOIN pg_namespace n ON n.oid = seq.relnamespace AND n.nspname = 'public'
+               CROSS JOIN LATERAL aclexplode(COALESCE(seq.relacl, acldefault('S', seq.relowner))) acl
+               LEFT JOIN pg_roles grantee ON grantee.oid = acl.grantee
+               WHERE acl.grantee = 0 OR acl.grantee = r.oid
+               ORDER BY seq.relname, CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END, acl.privilege_type
+             ) AS "directApplicationSequenceAcl",
+             ARRAY(
+               SELECT format('%s:%s', CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END, a.privilege_type)
+               FROM pg_default_acl d CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+               LEFT JOIN pg_roles grantee ON grantee.oid = a.grantee
+               WHERE d.defaclrole = (SELECT oid FROM pg_roles WHERE rolname = $1)
+                 AND d.defaclnamespace = 0 AND d.defaclobjtype = 'r'
+                 AND (CASE WHEN a.grantee = 0 THEN true ELSE pg_has_role(r.oid, a.grantee, 'USAGE') END)
+               ORDER BY 1
+             ) AS "globalDefaultTablePrivileges",
+             ARRAY(
+               SELECT format('%s:%s', CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END, a.privilege_type)
+               FROM pg_default_acl d CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+               LEFT JOIN pg_roles grantee ON grantee.oid = a.grantee
+               WHERE d.defaclnamespace = 0 AND d.defaclrole = (SELECT oid FROM pg_roles WHERE rolname = $1)
+                 AND d.defaclobjtype = 'S' AND (CASE WHEN a.grantee = 0 THEN true ELSE pg_has_role(r.oid, a.grantee, 'USAGE') END)
+               ORDER BY 1
+             ) AS "globalDefaultSequencePrivileges",
+             ARRAY(
+               SELECT format('%s:%s', CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END, a.privilege_type)
+               FROM pg_default_acl d CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+               LEFT JOIN pg_roles grantee ON grantee.oid = a.grantee
+               WHERE d.defaclnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+                 AND d.defaclrole = (SELECT oid FROM pg_roles WHERE rolname = $1)
+                 AND d.defaclobjtype = 'r' AND (CASE WHEN a.grantee = 0 THEN true ELSE pg_has_role(r.oid, a.grantee, 'USAGE') END)
+               ORDER BY 1
+             ) AS "schemaDefaultTablePrivileges",
+             ARRAY(
+               SELECT format('%s:%s', CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END, a.privilege_type)
+               FROM pg_default_acl d CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+               LEFT JOIN pg_roles grantee ON grantee.oid = a.grantee
+               WHERE d.defaclnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+                 AND d.defaclrole = (SELECT oid FROM pg_roles WHERE rolname = $1)
+                 AND d.defaclobjtype = 'S' AND (CASE WHEN a.grantee = 0 THEN true ELSE pg_has_role(r.oid, a.grantee, 'USAGE') END)
+               ORDER BY 1
+             ) AS "schemaDefaultSequencePrivileges"
       FROM pg_roles r WHERE r.rolname IN ('anon', 'authenticated') ORDER BY r.rolname
     `, [settings.runtimeUser, declaredApplicationTableNames]);
     let supabaseMigrationRecords = 0;
     let supabaseMigrationEntries: string[] = [];
     if (supabaseSchema.rows[0]?.exists) {
-      const tableExists = await pool.query<{ exists: boolean }>(`SELECT to_regclass('supabase_migrations.schema_migrations') IS NOT NULL AS exists`);
+      const tableExists = await catalogConnection.query<{ exists: boolean }>(`SELECT to_regclass('supabase_migrations.schema_migrations') IS NOT NULL AS exists`);
       if (tableExists.rows[0]?.exists) {
-        const count = await pool.query<{ count: string }>(`SELECT count(*)::text AS count FROM supabase_migrations.schema_migrations`);
+        const count = await catalogConnection.query<{ count: string }>(`SELECT count(*)::text AS count FROM supabase_migrations.schema_migrations`);
         supabaseMigrationRecords = Number(count.rows[0]?.count ?? '0');
-        const entries = await pool.query<{ entry: string }>(`
+        const entries = await catalogConnection.query<{ entry: string }>(`
           SELECT COALESCE(to_jsonb(m)->>'version', to_jsonb(m)->>'name', to_jsonb(m)->>'id', '<unidentified>') AS entry
           FROM supabase_migrations.schema_migrations m ORDER BY 1
         `);
         supabaseMigrationEntries = entries.rows.map((row) => row.entry);
       }
     }
-    const tableRows = await pool.query<{ tablename: string }>(`
+    const tableRows = await catalogConnection.query<{ tablename: string }>(`
       SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename
     `);
-    const rlsRows = await pool.query<{ tablename: string }>(`
+    const rlsRows = await catalogConnection.query<{ tablename: string }>(`
       SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND rowsecurity
         AND tablename = ANY($1::text[]) ORDER BY tablename
     `, [declaredApplicationTableNames]);
-    const policyRows = await pool.query<{ policyname: string }>(`
+    const policyRows = await catalogConnection.query<{ policyname: string }>(`
       SELECT policyname FROM pg_policies WHERE schemaname = 'public'
         AND tablename = ANY($1::text[])
     `, [declaredApplicationTableNames]);
-    const columnRows = await pool.query<{ table_name: string; column_name: string; sql_type: string; not_null: boolean; has_default: boolean; default_expression: string | null }>(`
+    const columnRows = await catalogConnection.query<{ table_name: string; column_name: string; sql_type: string; not_null: boolean; has_default: boolean; default_expression: string | null }>(`
       SELECT c.table_name, c.column_name, format_type(a.atttypid, a.atttypmod) AS sql_type,
              a.attnotnull AS not_null, (d.adbin IS NOT NULL) AS has_default,
              pg_get_expr(d.adbin, d.adrelid) AS default_expression
@@ -686,17 +846,17 @@ export async function openPostgresRuntime(settings: StagingDatabaseSettings, rea
       LEFT JOIN pg_attrdef d ON d.adrelid = t.oid AND d.adnum = a.attnum
       WHERE c.table_schema = 'public' ORDER BY c.table_name, c.ordinal_position
     `);
-    const indexRows = await pool.query<{ indexname: string }>(`SELECT indexname FROM pg_indexes WHERE schemaname = 'public'`);
-    const constraintRows = await pool.query<{ conname: string }>(`
+    const indexRows = await catalogConnection.query<{ indexname: string }>(`SELECT indexname FROM pg_indexes WHERE schemaname = 'public'`);
+    const constraintRows = await catalogConnection.query<{ conname: string }>(`
       SELECT con.conname FROM pg_constraint con JOIN pg_class rel ON rel.oid = con.conrelid
       JOIN pg_namespace n ON n.oid = rel.relnamespace WHERE n.nspname = 'public' AND rel.relname = ANY($1::text[])
     `, [declaredApplicationTableNames]);
-    const contactCheck = await pool.query<{ definition: string }>(`
+    const contactCheck = await catalogConnection.query<{ definition: string }>(`
       SELECT pg_get_constraintdef(con.oid) AS definition FROM pg_constraint con
       JOIN pg_class rel ON rel.oid = con.conrelid JOIN pg_namespace n ON n.oid = rel.relnamespace
       WHERE n.nspname = 'public' AND rel.relname = 'contact_inquiries' AND con.conname = 'contact_inquiries_status_valid'
     `);
-    const contactIndex = await pool.query<{ indexdef: string }>(`
+    const contactIndex = await catalogConnection.query<{ indexdef: string }>(`
       SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'contact_inquiries'
         AND indexname = 'contact_inquiries_created_at_idx'
     `);
@@ -769,7 +929,12 @@ export async function openPostgresRuntime(settings: StagingDatabaseSettings, rea
         migrationsTable: '__drizzle_migrations',
       });
     },
-    close: async () => { await pool.end(); },
+    close: async () => {
+      if (readOnlySession) return readOnlySession.close();
+      let closeError: unknown;
+      try { await pool.end(); } catch (error) { closeError ??= error; }
+      if (closeError) throw closeError;
+    },
   };
 }
 

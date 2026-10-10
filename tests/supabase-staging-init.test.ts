@@ -10,6 +10,7 @@ import {
   assertStagingRequiredSchemas,
   assertSupabaseAutomaticRlsConfiguration,
   assertSupabaseAutomaticRlsUnchanged,
+  supabaseAutomaticRlsDiagnostics,
   normalizeStagingSqlType,
   resolveSupabaseStagingSettings,
   type StagingCatalogState,
@@ -19,6 +20,9 @@ import {
   loadStagingRunnerDependencies,
   runSupabaseStagingPreflight,
   runSupabaseStagingCommand,
+  beginVerifiedReadOnlyTransaction,
+  openVerifiedReadOnlySession,
+  StagingReadOnlyTransactionError,
   type StagingRunnerDependencies,
 } from '../scripts/supabase-staging-runner.ts';
 
@@ -27,12 +31,12 @@ const productionRef = 'zyxwvutsrqponmlkjihg';
 const approvedAutoRlsFunction = {
   schema: 'public', name: 'rls_auto_enable', argumentCount: 0, identityArguments: '', owner: 'postgres',
   language: 'plpgsql', returnType: 'event_trigger', securityDefiner: true, strict: false, volatility: 'v',
-  configuration: ['search_path=pg_catalog'], sourceLength: 1055, sourceMd5: 'c44fb229ea8a6b0afd04a0a33261c16c',
+  configuration: ['search_path=pg_catalog'], sourceLength: 1055, sourceMd5: 'c44fb229ea8a6b0afd04a0a33261c16c', objectId: '18201',
 };
 const approvedAutoRlsTrigger = {
   name: 'ensure_rls', owner: 'postgres', enabled: 'O', event: 'ddl_command_end',
   tags: ['CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO'],
-  handlerSchema: 'public', handlerName: 'rls_auto_enable', handlerArgumentCount: 0,
+  handlerSchema: 'public', handlerName: 'rls_auto_enable', handlerArgumentCount: 0, handlerObjectId: '18201',
 };
 const baseEnv: Record<string, string | undefined> = {
   SUPABASE_STAGING_ENABLED: 'true',
@@ -80,7 +84,7 @@ function state(deps: StagingRunnerDependencies, contact = false, securityApplied
     supabaseMigrationSchemaExists: false,
     supabaseMigrationRecords: 0,
     dataApiRoles: ['anon', 'authenticated'],
-    dataApiRoleAudit: ['anon', 'authenticated'].map((role) => ({ role, superuser: false, bypassRls: false, inheritsRuntimeOwner: false, publicUsage: true, publicCreate: false, authUsage: false, authCreate: false, storageUsage: false, storageCreate: false, drizzleUsage: false, drizzleCreate: false, applicationTablePrivileges: [], applicationSequencePrivileges: [] })),
+    dataApiRoleAudit: ['anon', 'authenticated'].map((role) => ({ role, superuser: false, bypassRls: false, inheritsRuntimeOwner: false, memberOfRuntimeOwner: false, publicUsage: true, publicCreate: false, authUsage: false, authCreate: false, storageUsage: false, storageCreate: false, drizzleUsage: false, drizzleCreate: false, applicationTablePrivileges: [], applicationColumnPrivileges: [], applicationSequencePrivileges: [], directApplicationTableAcl: [], directApplicationColumnAcl: [], directApplicationSequenceAcl: [], globalDefaultTablePrivileges: [], globalDefaultSequencePrivileges: [], schemaDefaultTablePrivileges: [], schemaDefaultSequencePrivileges: [] })),
     applicationTables: tables,
     applicationColumns: Object.fromEntries(Object.entries(columns).map(([table, values]) => [table, values.map((column) => ({
       ...column,
@@ -105,7 +109,7 @@ function emptyPreflightState(deps: StagingRunnerDependencies): StagingCatalogSta
     supabaseMigrationSchemaExists: false, supabaseMigrationRecords: 0, supabaseMigrationEntries: [],
     applicationTables: [], applicationColumns: {}, applicationIndexes: [], applicationConstraints: [],
     applicationColumnDefaults: {}, applicationRlsTables: [], applicationPolicies: [],
-    dataApiRoleAudit: ['anon', 'authenticated'].map((role) => ({ role, superuser: false, bypassRls: false, inheritsRuntimeOwner: false, publicUsage: true, publicCreate: false, authUsage: false, authCreate: false, storageUsage: false, storageCreate: false, drizzleUsage: false, drizzleCreate: false, applicationTablePrivileges: [], applicationSequencePrivileges: [] })),
+    dataApiRoleAudit: ['anon', 'authenticated'].map((role) => ({ role, superuser: false, bypassRls: false, inheritsRuntimeOwner: false, memberOfRuntimeOwner: false, publicUsage: true, publicCreate: false, authUsage: false, authCreate: false, storageUsage: false, storageCreate: false, drizzleUsage: false, drizzleCreate: false, applicationTablePrivileges: [], applicationColumnPrivileges: [], applicationSequencePrivileges: [], directApplicationTableAcl: [], directApplicationColumnAcl: [], directApplicationSequenceAcl: [], globalDefaultTablePrivileges: [], globalDefaultSequencePrivileges: [], schemaDefaultTablePrivileges: [], schemaDefaultSequencePrivileges: [] })),
   };
 }
 
@@ -224,7 +228,7 @@ describe('Supabase staging initialization guard', () => {
       supabaseAutomaticRlsFunctions: [approvedAutoRlsFunction], eventTriggers: [approvedAutoRlsTrigger],
       publicObjects: [{ name: 'rls_auto_enable', kind: 'routine', extensionOwned: false }], drizzleObjects: [], drizzleSchemaExists: false, drizzleRelations: [], migrationHistory: [],
       supabaseMigrationSchemaExists: false, supabaseMigrationRecords: 0, dataApiRoles: ['anon', 'authenticated'],
-      dataApiRoleAudit: ['anon', 'authenticated'].map((role) => ({ role, superuser: false, bypassRls: false, inheritsRuntimeOwner: false, publicUsage: true, publicCreate: false, authUsage: false, authCreate: false, storageUsage: false, storageCreate: false, drizzleUsage: false, drizzleCreate: false, applicationTablePrivileges: [], applicationSequencePrivileges: [] })),
+      dataApiRoleAudit: ['anon', 'authenticated'].map((role) => ({ role, superuser: false, bypassRls: false, inheritsRuntimeOwner: false, memberOfRuntimeOwner: false, publicUsage: true, publicCreate: false, authUsage: false, authCreate: false, storageUsage: false, storageCreate: false, drizzleUsage: false, drizzleCreate: false, applicationTablePrivileges: [], applicationColumnPrivileges: [], applicationSequencePrivileges: [], directApplicationTableAcl: [], directApplicationColumnAcl: [], directApplicationSequenceAcl: [], globalDefaultTablePrivileges: [], globalDefaultSequencePrivileges: [], schemaDefaultTablePrivileges: [], schemaDefaultSequencePrivileges: [] })),
       applicationTables: [], applicationColumns: {}, applicationIndexes: [], applicationConstraints: [], applicationColumnDefaults: {}, applicationRlsTables: [], applicationPolicies: [],
     };
     assert.doesNotThrow(() => assertStagingInitializationState(empty));
@@ -247,7 +251,7 @@ describe('Supabase staging initialization guard', () => {
       drizzleObjects: [],
       drizzleSchemaExists: false, drizzleRelations: [], migrationHistory: [],
       supabaseMigrationSchemaExists: false, supabaseMigrationRecords: 0, dataApiRoles: ['anon', 'authenticated'],
-      dataApiRoleAudit: ['anon', 'authenticated'].map((role) => ({ role, superuser: false, bypassRls: false, inheritsRuntimeOwner: false, publicUsage: true, publicCreate: false, authUsage: false, authCreate: false, storageUsage: false, storageCreate: false, drizzleUsage: false, drizzleCreate: false, applicationTablePrivileges: [], applicationSequencePrivileges: [] })),
+      dataApiRoleAudit: ['anon', 'authenticated'].map((role) => ({ role, superuser: false, bypassRls: false, inheritsRuntimeOwner: false, memberOfRuntimeOwner: false, publicUsage: true, publicCreate: false, authUsage: false, authCreate: false, storageUsage: false, storageCreate: false, drizzleUsage: false, drizzleCreate: false, applicationTablePrivileges: [], applicationColumnPrivileges: [], applicationSequencePrivileges: [], directApplicationTableAcl: [], directApplicationColumnAcl: [], directApplicationSequenceAcl: [], globalDefaultTablePrivileges: [], globalDefaultSequencePrivileges: [], schemaDefaultTablePrivileges: [], schemaDefaultSequencePrivileges: [] })),
       applicationTables: [], applicationColumns: {}, applicationIndexes: [], applicationConstraints: [], applicationColumnDefaults: {}, applicationRlsTables: [], applicationPolicies: [],
     };
     assert.doesNotThrow(() => assertStagingInitializationState(empty));
@@ -263,12 +267,26 @@ describe('Supabase staging initialization guard', () => {
       supabaseAutomaticRlsFunctions: [approvedAutoRlsFunction], eventTriggers: [approvedAutoRlsTrigger],
       drizzleSchemaExists: false, drizzleRelations: [], migrationHistory: [],
       supabaseMigrationSchemaExists: false, supabaseMigrationRecords: 0, dataApiRoles: ['anon', 'authenticated'],
-      dataApiRoleAudit: ['anon', 'authenticated'].map((role) => ({ role, superuser: false, bypassRls: false, inheritsRuntimeOwner: false, publicUsage: true, publicCreate: false, authUsage: false, authCreate: false, storageUsage: false, storageCreate: false, drizzleUsage: false, drizzleCreate: false, applicationTablePrivileges: [], applicationSequencePrivileges: [] })),
+      dataApiRoleAudit: ['anon', 'authenticated'].map((role) => ({ role, superuser: false, bypassRls: false, inheritsRuntimeOwner: false, memberOfRuntimeOwner: false, publicUsage: true, publicCreate: false, authUsage: false, authCreate: false, storageUsage: false, storageCreate: false, drizzleUsage: false, drizzleCreate: false, applicationTablePrivileges: [], applicationColumnPrivileges: [], applicationSequencePrivileges: [], directApplicationTableAcl: [], directApplicationColumnAcl: [], directApplicationSequenceAcl: [], globalDefaultTablePrivileges: [], globalDefaultSequencePrivileges: [], schemaDefaultTablePrivileges: [], schemaDefaultSequencePrivileges: [] })),
       applicationTables: [], applicationColumns: {}, applicationIndexes: [], applicationConstraints: [], applicationColumnDefaults: {}, applicationRlsTables: [], applicationPolicies: [],
     };
     assert.doesNotThrow(() => assertStagingInitializationState(accepted));
     assert.doesNotThrow(() => assertSupabaseAutomaticRlsConfiguration(accepted));
     assert.doesNotThrow(() => assertSupabaseAutomaticRlsUnchanged(accepted, structuredClone(accepted)));
+    assert.ok(Object.values(supabaseAutomaticRlsDiagnostics(accepted)).every(Boolean));
+
+    // pg returns catalog text[] values as JavaScript arrays; order does not matter.
+    const shuffledTags = { ...accepted, eventTriggers: [{ ...approvedAutoRlsTrigger, tags: ['SELECT INTO', 'CREATE TABLE', 'CREATE TABLE AS'] }] };
+    assert.doesNotThrow(() => assertSupabaseAutomaticRlsConfiguration(shuffledTags));
+    assert.ok(Object.values(supabaseAutomaticRlsDiagnostics(shuffledTags)).every(Boolean));
+
+    // Diagnose the intended trigger even when an extra event trigger makes the target unsafe.
+    const extraTriggerState = { ...accepted, eventTriggers: [approvedAutoRlsTrigger, { ...approvedAutoRlsTrigger, name: 'unrelated_trigger', handlerName: 'other_handler' }] };
+    const extraTriggerChecks = supabaseAutomaticRlsDiagnostics(extraTriggerState);
+    assert.equal(extraTriggerChecks.trigger_name_matches, true);
+    assert.equal(extraTriggerChecks.trigger_handler_matches, true);
+    assert.equal(extraTriggerChecks.only_expected_event_trigger_present, false);
+    assert.throws(() => assertSupabaseAutomaticRlsConfiguration(extraTriggerState));
 
     const badStates: StagingCatalogState[] = [
       { ...accepted, supabaseAutomaticRlsFunctions: [{ ...approvedAutoRlsFunction, sourceMd5: '0'.repeat(32) }] },
@@ -298,7 +316,11 @@ describe('Supabase staging initialization guard', () => {
       { ...accepted, publicObjects: [...accepted.publicObjects, { name: 'custom_function', kind: 'routine', extensionOwned: false }] },
       { ...accepted, publicObjects: [...accepted.publicObjects, { name: 'unexpected_table', kind: 'relation', extensionOwned: false }] },
     ];
-    for (const rejected of badStates) assert.throws(() => assertStagingInitializationState(rejected));
+    for (const rejected of badStates.slice(0, -2)) {
+      assert.throws(() => assertStagingInitializationState(rejected));
+      assert.ok(Object.values(supabaseAutomaticRlsDiagnostics(rejected)).some((value) => !value));
+    }
+    for (const rejected of badStates.slice(-2)) assert.throws(() => assertStagingInitializationState(rejected));
     assert.throws(() => assertSupabaseAutomaticRlsUnchanged(accepted, badStates[2]!));
   });
 
@@ -314,7 +336,7 @@ describe('Supabase staging initialization guard', () => {
       ...genericState,
       supabaseAutomaticRlsFunctions: [], eventTriggers: [], drizzleObjects: [], drizzleSchemaExists: false, drizzleRelations: [], migrationHistory: [],
       supabaseMigrationSchemaExists: false, supabaseMigrationRecords: 0, dataApiRoles: ['anon', 'authenticated'],
-      dataApiRoleAudit: ['anon', 'authenticated'].map((role) => ({ role, superuser: false, bypassRls: false, inheritsRuntimeOwner: false, publicUsage: true, publicCreate: false, authUsage: false, authCreate: false, storageUsage: false, storageCreate: false, drizzleUsage: false, drizzleCreate: false, applicationTablePrivileges: [], applicationSequencePrivileges: [] })),
+      dataApiRoleAudit: ['anon', 'authenticated'].map((role) => ({ role, superuser: false, bypassRls: false, inheritsRuntimeOwner: false, memberOfRuntimeOwner: false, publicUsage: true, publicCreate: false, authUsage: false, authCreate: false, storageUsage: false, storageCreate: false, drizzleUsage: false, drizzleCreate: false, applicationTablePrivileges: [], applicationColumnPrivileges: [], applicationSequencePrivileges: [], directApplicationTableAcl: [], directApplicationColumnAcl: [], directApplicationSequenceAcl: [], globalDefaultTablePrivileges: [], globalDefaultSequencePrivileges: [], schemaDefaultTablePrivileges: [], schemaDefaultSequencePrivileges: [] })),
       applicationTables: [], applicationColumns: {}, applicationIndexes: [], applicationConstraints: [], applicationColumnDefaults: {}, applicationRlsTables: [], applicationPolicies: [],
     }));
   });
@@ -346,25 +368,117 @@ describe('Supabase staging initialization guard', () => {
     assert.doesNotThrow(() => assertStagingDataApiRoles(['anon', 'authenticated']));
     assert.throws(() => assertStagingDataApiRoles(['anon']));
     const safeRoles = ['anon', 'authenticated'].map((role) => ({
-      role, superuser: false, bypassRls: false, inheritsRuntimeOwner: false, publicUsage: true, publicCreate: false,
+      role, superuser: false, bypassRls: false, inheritsRuntimeOwner: false, memberOfRuntimeOwner: false, publicUsage: true, publicCreate: false,
       authUsage: false, authCreate: false, storageUsage: false, storageCreate: false,
-      drizzleUsage: false, drizzleCreate: false, applicationTablePrivileges: [], applicationSequencePrivileges: [],
+      drizzleUsage: false, drizzleCreate: false, applicationTablePrivileges: [], applicationColumnPrivileges: [], applicationSequencePrivileges: [], directApplicationTableAcl: [], directApplicationColumnAcl: [], directApplicationSequenceAcl: [], globalDefaultTablePrivileges: [], globalDefaultSequencePrivileges: [], schemaDefaultTablePrivileges: [], schemaDefaultSequencePrivileges: [],
     }));
     assert.doesNotThrow(() => assertStagingDataApiPrivileges({ dataApiRoleAudit: safeRoles }));
+    // Ordinary schema USAGE is informational; access to application objects is assessed separately.
+    assert.doesNotThrow(() => assertStagingDataApiPrivileges({ dataApiRoleAudit: safeRoles.map((role) => ({
+      ...role, publicUsage: true, authUsage: true, storageUsage: true,
+    })) }));
+    assert.throws(() => assertStagingDataApiPrivileges({ dataApiRoleAudit: safeRoles.map((role) => ({ ...role, memberOfRuntimeOwner: true })) }));
+    assert.throws(() => assertStagingDataApiPrivileges({ dataApiRoleAudit: [safeRoles[0]!, safeRoles[0]!] }));
+    assert.throws(() => assertStagingDataApiPrivileges({ dataApiRoleAudit: [safeRoles[0]!] }));
     for (const changed of [
       { ...safeRoles[0]!, inheritsRuntimeOwner: true },
+      { ...safeRoles[0]!, memberOfRuntimeOwner: true },
+      { ...safeRoles[0]!, applicationColumnPrivileges: ['orders:SELECT'] },
+      { ...safeRoles[0]!, globalDefaultTablePrivileges: ['PUBLIC:SELECT'] },
+      { ...safeRoles[0]!, globalDefaultSequencePrivileges: ['anon:USAGE'] },
+      { ...safeRoles[0]!, schemaDefaultTablePrivileges: ['inherited_role:SELECT'] },
+      { ...safeRoles[0]!, schemaDefaultSequencePrivileges: ['PUBLIC:USAGE'] },
       { ...safeRoles[0]!, publicCreate: true },
       { ...safeRoles[0]!, drizzleCreate: true },
       { ...safeRoles[0]!, superuser: true },
       { ...safeRoles[0]!, bypassRls: true },
       { ...safeRoles[0]!, applicationTablePrivileges: ['orders:SELECT'] },
       { ...safeRoles[0]!, applicationSequencePrivileges: ['orders_id_seq:USAGE'] },
+      { ...safeRoles[0]!, directApplicationTableAcl: ['products:PUBLIC:SELECT'] },
+      { ...safeRoles[0]!, directApplicationColumnAcl: ['orders.id:authenticated:SELECT'] },
+      { ...safeRoles[0]!, directApplicationSequenceAcl: ['orders_id_seq:PUBLIC:USAGE'] },
+      { ...safeRoles[0]!, authCreate: true },
+      { ...safeRoles[0]!, storageCreate: true },
+      { ...safeRoles[0]!, schemaDefaultTablePrivileges: ['authenticated:SELECT'] },
+      { ...safeRoles[0]!, schemaDefaultSequencePrivileges: ['anon:USAGE'] },
     ]) assert.throws(() => assertStagingDataApiPrivileges({ dataApiRoleAudit: [changed, safeRoles[1]] }));
     assert.throws(() => assertStagingRequiredSchemas({ public: true, auth: false, storage: true, drizzle: false, supabaseMigrations: false }));
     assert.throws(() => resolveSupabaseStagingSettings('migrate', ['--confirm-staging-migrate'], {
       ...baseEnv,
       SUPABASE_STAGING_RUNTIME_DATABASE_USER: 'different_runtime_role',
     }));
+  });
+
+  it('requires a confirmed read-only transaction before catalog or identity reads', async () => {
+    const statements: string[] = [];
+    const client = {
+      query: async (sql: string) => { statements.push(sql); return { rows: [{ transaction_read_only: 'on' }] }; },
+      release: () => undefined,
+    };
+    await beginVerifiedReadOnlyTransaction(client);
+    await client.query('SELECT current_database()');
+    assert.deepEqual(statements, ['BEGIN READ ONLY', "SELECT current_setting('transaction_read_only') AS transaction_read_only", 'SELECT current_database()']);
+
+    for (const rows of [[], [{ transaction_read_only: false }]]) {
+      const rejectedStatements: string[] = [];
+      await assert.rejects(beginVerifiedReadOnlyTransaction({
+        query: async (sql: string) => { rejectedStatements.push(sql); return { rows }; },
+        release: () => undefined,
+      }), StagingReadOnlyTransactionError);
+      assert.deepEqual(rejectedStatements, ['BEGIN READ ONLY', "SELECT current_setting('transaction_read_only') AS transaction_read_only"]);
+    }
+  });
+
+  it('keeps catalog queries on the checked-out read-only client and rolls back/releases on every outcome', async () => {
+    for (const scenario of ['success', 'identity-mismatch', 'query-failure'] as const) {
+      const calls: string[] = [];
+      let released = false;
+      let ended = false;
+      const client = {
+        query: async (sql: string) => {
+          calls.push(sql);
+          if (sql.startsWith('SELECT current_setting')) return { rows: [{ transaction_read_only: 'on' }] };
+          if (scenario === 'query-failure' && sql === 'SELECT identity') throw new Error('private error');
+          return { rows: [] };
+        },
+        release: () => { released = true; },
+      };
+      const session = await openVerifiedReadOnlySession({
+        connect: async () => client,
+        end: async () => { ended = true; },
+      });
+      try {
+        if (scenario === 'query-failure') await assert.rejects(session.client.query('SELECT identity'));
+        else if (scenario === 'identity-mismatch') {
+          await assert.rejects(async () => {
+            await session.client.query('SELECT identity');
+            throw new Error('identity mismatch');
+          });
+        } else await session.client.query('SELECT identity');
+      } finally {
+        await session.close();
+      }
+      assert.deepEqual(calls, ['BEGIN READ ONLY', "SELECT current_setting('transaction_read_only') AS transaction_read_only", 'SELECT identity', 'ROLLBACK']);
+      assert.equal(released, true);
+      assert.equal(ended, true);
+    }
+
+    const failedSetupCalls: string[] = [];
+    let failedSetupReleased = false;
+    let failedSetupPoolClosed = false;
+    await assert.rejects(openVerifiedReadOnlySession({
+      connect: async () => ({
+        query: async (sql: string) => {
+          failedSetupCalls.push(sql);
+          return { rows: sql === 'BEGIN READ ONLY' ? [] : [{ transaction_read_only: false }] };
+        },
+        release: () => { failedSetupReleased = true; },
+      }),
+      end: async () => { failedSetupPoolClosed = true; },
+    }), StagingReadOnlyTransactionError);
+    assert.deepEqual(failedSetupCalls, ['BEGIN READ ONLY', "SELECT current_setting('transaction_read_only') AS transaction_read_only", 'ROLLBACK']);
+    assert.equal(failedSetupReleased, true);
+    assert.equal(failedSetupPoolClosed, true);
   });
 
   it('runs a strictly read-only preflight after target validation and closes the connection', async () => {
@@ -395,6 +509,19 @@ describe('Supabase staging initialization guard', () => {
     assert.ok(lines.some((line) => line.includes('ELIGIBLE for guarded baseline initialization')));
     assert.ok(lines.some((line) => line.includes('session_user=postgres')));
     assert.ok(lines.some((line) => line.includes('source_md5=c44fb229ea8a6b0afd04a0a33261c16c')));
+  });
+
+  it('stops before catalog inspection when the read-only transaction cannot be verified', async () => {
+    const deps = await loadStagingRunnerDependencies(async () => { throw new Error('unused'); });
+    const lines: string[] = [];
+    const code = await runSupabaseStagingPreflight(['--confirm-staging-preflight'], baseEnv, {
+      ...deps,
+      open: async () => {
+        throw new StagingReadOnlyTransactionError();
+      },
+    }, (line) => lines.push(line));
+    assert.equal(code, 1);
+    assert.ok(lines.some((line) => line.includes('READ_ONLY_TRANSACTION_REQUIRED')));
   });
 
   it('fails read-only preflight configuration checks before opening a connection', async () => {

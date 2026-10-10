@@ -32,11 +32,11 @@ export type StagingCatalogState = {
   supabaseAutomaticRlsFunctions: Array<{
     schema: string; name: string; argumentCount: number; identityArguments: string; owner: string;
     language: string; returnType: string; securityDefiner: boolean; strict: boolean; volatility: string;
-    configuration: string[] | null; sourceLength: number; sourceMd5: string;
+    configuration: string[] | null; sourceLength: number; sourceMd5: string; objectId: string;
   }>;
   eventTriggers: Array<{
     name: string; owner: string; enabled: string; event: string; tags: string[] | null;
-    handlerSchema: string; handlerName: string; handlerArgumentCount: number;
+    handlerSchema: string; handlerName: string; handlerArgumentCount: number; handlerObjectId: string;
   }>;
   drizzleSchemaExists: boolean;
   drizzleRelations: string[];
@@ -46,10 +46,13 @@ export type StagingCatalogState = {
   supabaseMigrationEntries?: string[];
   dataApiRoles: string[];
   dataApiRoleAudit?: Array<{
-    role: string; superuser: boolean; bypassRls: boolean; inheritsRuntimeOwner: boolean;
+    role: string; superuser: boolean; bypassRls: boolean; inheritsRuntimeOwner: boolean; memberOfRuntimeOwner: boolean;
     publicUsage: boolean; publicCreate: boolean; authUsage: boolean; authCreate: boolean;
     storageUsage: boolean; storageCreate: boolean; drizzleUsage: boolean; drizzleCreate: boolean;
-    applicationTablePrivileges: string[]; applicationSequencePrivileges: string[];
+    applicationTablePrivileges: string[]; applicationColumnPrivileges: string[]; applicationSequencePrivileges: string[];
+    directApplicationTableAcl: string[]; directApplicationColumnAcl: string[]; directApplicationSequenceAcl: string[];
+    globalDefaultTablePrivileges: string[]; globalDefaultSequencePrivileges: string[];
+    schemaDefaultTablePrivileges: string[]; schemaDefaultSequencePrivileges: string[];
   }>;
   applicationTables: string[];
   applicationColumns: Record<string, Array<{ name: string; type: string; notNull: boolean; hasDefault: boolean }>>;
@@ -79,9 +82,10 @@ const expectedAutomaticRlsEventTrigger = {
 function exactAutomaticRlsConfiguration(state: StagingCatalogState): boolean {
   if (state.supabaseAutomaticRlsFunctions.length !== 1 || state.eventTriggers.length !== 1) return false;
   const fn = state.supabaseAutomaticRlsFunctions[0]!;
-  const trigger = state.eventTriggers[0]!;
+  const trigger = state.eventTriggers.find((item) => item.name === expectedAutomaticRlsEventTrigger.name);
   const config = fn.configuration ? [...fn.configuration].sort() : null;
-  const tags = trigger.tags ? [...trigger.tags].sort() : null;
+  const tags = normalizeEventTags(trigger?.tags);
+  if (!trigger || !tags) return false;
   return fn.schema === expectedAutomaticRlsFunction.schema
     && fn.name === expectedAutomaticRlsFunction.name
     && fn.argumentCount === expectedAutomaticRlsFunction.argumentCount
@@ -102,7 +106,63 @@ function exactAutomaticRlsConfiguration(state: StagingCatalogState): boolean {
     && JSON.stringify(tags) === JSON.stringify([...expectedAutomaticRlsEventTrigger.tags].sort())
     && trigger.handlerSchema === expectedAutomaticRlsEventTrigger.handlerSchema
     && trigger.handlerName === expectedAutomaticRlsEventTrigger.handlerName
-    && trigger.handlerArgumentCount === expectedAutomaticRlsEventTrigger.handlerArgumentCount;
+    && trigger.handlerArgumentCount === expectedAutomaticRlsEventTrigger.handlerArgumentCount
+    && trigger.handlerObjectId === fn.objectId;
+}
+
+/** pg's text[] parser returns a JS string array. Reject alternate or malformed representations. */
+function normalizeEventTags(tags: unknown): string[] | null {
+  if (!Array.isArray(tags) || tags.some((tag) => typeof tag !== 'string')) return null;
+  return [...tags].sort();
+}
+
+/** Safe per-property diagnostics; values are booleans so arbitrary catalog text is never echoed. */
+export function supabaseAutomaticRlsDiagnostics(state: StagingCatalogState): Record<string, boolean> {
+  const fn = state.supabaseAutomaticRlsFunctions.length === 1 ? state.supabaseAutomaticRlsFunctions[0] : undefined;
+  // Select the intended trigger without filtering on properties that must be diagnosed.
+  // The exact matcher still rejects every additional event trigger.
+  const namedTriggers = state.eventTriggers.filter((item) => item.name === expectedAutomaticRlsEventTrigger.name);
+  const handlerTriggers = state.eventTriggers.filter((item) => item.handlerSchema === expectedAutomaticRlsEventTrigger.handlerSchema
+    && item.handlerName === expectedAutomaticRlsEventTrigger.handlerName
+    && item.handlerArgumentCount === expectedAutomaticRlsEventTrigger.handlerArgumentCount);
+  const candidates = [...new Set([...namedTriggers, ...handlerTriggers])];
+  const trigger = candidates.length === 1 ? candidates[0] : namedTriggers.length === 1 ? namedTriggers[0] : undefined;
+  const expectedFn = expectedAutomaticRlsFunction;
+  const expectedTrigger = expectedAutomaticRlsEventTrigger;
+  const sameSet = (actual: unknown, expected: readonly string[]) => {
+    const normalized = normalizeEventTags(actual);
+    const expectedSorted = [...expected].sort();
+    return normalized !== null && normalized.length === expectedSorted.length
+      && normalized.every((tag, index) => tag === expectedSorted[index]);
+  };
+  const configuration = fn?.configuration ? [...fn.configuration].sort() : null;
+  return {
+    function_present_unique: Boolean(fn),
+    function_schema_matches: fn?.schema === expectedFn.schema,
+    function_name_matches: fn?.name === expectedFn.name,
+    function_zero_arguments: fn?.argumentCount === expectedFn.argumentCount && fn.identityArguments === expectedFn.identityArguments,
+    function_owner_matches: fn?.owner === expectedFn.owner,
+    function_language_matches: fn?.language === expectedFn.language,
+    function_return_type_matches: fn?.returnType === expectedFn.returnType,
+    function_security_definer_matches: fn?.securityDefiner === expectedFn.securityDefiner,
+    function_strictness_matches: fn?.strict === expectedFn.strict,
+    function_volatility_matches: fn?.volatility === expectedFn.volatility,
+    function_settings_match: Boolean(fn && JSON.stringify(configuration) === JSON.stringify([...expectedFn.configuration].sort())),
+    function_source_length_matches: fn?.sourceLength === expectedFn.sourceLength,
+    function_source_fingerprint_matches: fn?.sourceMd5 === expectedFn.sourceMd5,
+    trigger_present_unique: namedTriggers.length === 1,
+    only_expected_event_trigger_present: state.eventTriggers.length === 1,
+    trigger_name_matches: trigger?.name === expectedTrigger.name,
+    trigger_owner_matches: trigger?.owner === expectedTrigger.owner,
+    trigger_enabled_matches: trigger?.enabled === expectedTrigger.enabled,
+    trigger_event_matches: trigger?.event === expectedTrigger.event,
+    trigger_event_tag_set_matches: Boolean(trigger && sameSet(trigger.tags, expectedTrigger.tags)),
+    trigger_handler_matches: Boolean(trigger && trigger.handlerSchema === expectedTrigger.handlerSchema
+      && trigger.handlerName === expectedTrigger.handlerName && trigger.handlerArgumentCount === expectedTrigger.handlerArgumentCount),
+    function_trigger_relationship_matches: Boolean(fn && trigger && trigger.handlerSchema === fn.schema
+      && trigger.handlerName === fn.name && trigger.handlerArgumentCount === fn.argumentCount
+      && trigger.handlerObjectId === fn.objectId),
+  };
 }
 
 /** Requires the exact Supabase-created automatic-RLS function and its enabled event trigger. */
@@ -366,10 +426,14 @@ export function assertStagingRequiredSchemas(schemas: StagingCatalogState['schem
 }
 
 export function assertStagingDataApiPrivileges(state: Pick<StagingCatalogState, 'dataApiRoleAudit'>): void {
-  if (state.dataApiRoleAudit?.length !== 2
-    || state.dataApiRoleAudit.some((role) => role.superuser || role.bypassRls || role.inheritsRuntimeOwner
+  const auditedRoles = state.dataApiRoleAudit?.map((role) => role.role).sort();
+  if (!auditedRoles || JSON.stringify(auditedRoles) !== JSON.stringify(['anon', 'authenticated'])
+    || state.dataApiRoleAudit.some((role) => role.superuser || role.bypassRls || role.inheritsRuntimeOwner || role.memberOfRuntimeOwner
       || role.publicCreate || role.drizzleCreate || role.applicationTablePrivileges.length > 0
-      || role.authCreate || role.storageCreate || role.applicationSequencePrivileges.length > 0)) {
+      || role.applicationColumnPrivileges.length > 0 || role.authCreate || role.storageCreate || role.applicationSequencePrivileges.length > 0
+      || role.directApplicationTableAcl.length > 0 || role.directApplicationColumnAcl.length > 0 || role.directApplicationSequenceAcl.length > 0
+      || role.globalDefaultTablePrivileges.length > 0 || role.globalDefaultSequencePrivileges.length > 0
+      || role.schemaDefaultTablePrivileges.length > 0 || role.schemaDefaultSequencePrivileges.length > 0)) {
     throw new Error('Data API role privileges are not safely isolated from the application owner and business tables.');
   }
 }
