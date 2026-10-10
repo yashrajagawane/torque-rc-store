@@ -151,7 +151,7 @@ export const ContactPage = () => {
                     Showroom & Workshop
                   </span>
                   <p className="text-xs font-bold text-white [word-spacing:0.1em]">
-                    RC MEGA Performance Circuit & Garage
+                    Fly RC Hobbies Performance Circuit & Garage
                   </p>
                   <p className="text-[10px] text-muted-foreground [word-spacing:0.1em]">
                     Sector 4 Motorsports Complex, High-Tech Industrial Park

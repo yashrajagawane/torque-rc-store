@@ -9,7 +9,7 @@ function AuthFrame({ title, subtitle, children }: { title: string; subtitle: str
   return (
     <section className="pt-36 pb-24 min-h-[75vh] px-4">
       <div className="glass-card border border-white/10 bg-[#0a0a0a] max-w-lg mx-auto p-6 sm:p-10">
-        <p className="text-accent font-mono text-xs font-bold uppercase tracking-[0.25em] mb-3">RC MEGA / PILOT ACCESS</p>
+        <p className="text-accent font-mono text-xs font-bold uppercase tracking-[0.25em] mb-3">FLY RC HOBBIES / PILOT ACCESS</p>
         <h1 className="text-3xl sm:text-4xl italic mb-3">{title}</h1>
         <p className="text-sm text-muted-foreground mb-8">{subtitle}</p>
         {children}
@@ -94,7 +94,7 @@ function AuthForm({ mode }: { mode: AuthMode }) {
   }
 
   const title = mode === 'login' ? 'PILOT SIGN IN' : mode === 'register' ? 'JOIN THE GARAGE' : mode === 'recovery' ? 'RESET PASSWORD' : 'SET NEW PASSWORD';
-  const subtitle = mode === 'login' ? 'Sign in to access your customer account.' : mode === 'register' ? 'Create an account to manage your RC MEGA profile.' : mode === 'recovery' ? 'We’ll email you a secure password reset link.' : 'Choose a new password for your account.';
+  const subtitle = mode === 'login' ? 'Sign in to access your customer account.' : mode === 'register' ? 'Create an account to manage your Fly RC Hobbies profile.' : mode === 'recovery' ? 'We’ll email you a secure password reset link.' : 'Choose a new password for your account.';
 
   return <AuthFrame title={title} subtitle={subtitle}>
     <form onSubmit={submit} className="space-y-5" noValidate>

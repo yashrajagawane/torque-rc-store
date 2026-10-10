@@ -118,7 +118,7 @@ export const BrandsPage = () => {
             AUTHORIZED RC MANUFACTURERS
           </h1>
           <p className="text-muted-foreground text-sm sm:text-base md:text-lg max-w-3xl leading-relaxed italic [word-spacing:0.12em]">
-            RC MEGA is an official, factory-authorized partner and distributor for the world’s leading RC brands. Every machine carries full factory warranty support, genuine spare parts availability, and technical pit crew backing.
+            Fly RC Hobbies is an official, factory-authorized partner and distributor for the world’s leading RC brands. Every machine carries full factory warranty support, genuine spare parts availability, and technical pit crew backing.
           </p>
         </div>
 

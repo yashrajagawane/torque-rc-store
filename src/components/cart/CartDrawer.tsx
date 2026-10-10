@@ -61,7 +61,7 @@ export const CartDrawer = ({ isOpen, onClose }: CartDrawerProps) => {
               </div>}
               {recovery?.legacyMergeKey && <div role="alert" className="p-3 border border-amber-500/30 bg-amber-500/5 text-amber-200 text-xs">
                 <p>This older merge has no saved request payload, so it cannot be retried safely. Its saved cart data remains preserved on this device.</p>
-                <p className="mt-2">Contact RC MEGA support with recovery reference <code className="select-all break-all">{recovery.legacyMergeKey}</code>. Do not clear this browser's saved data.</p>
+                <p className="mt-2">Contact Fly RC Hobbies support with recovery reference <code className="select-all break-all">{recovery.legacyMergeKey}</code>. Do not clear this browser's saved data.</p>
               </div>}
               {recovery?.pendingMergeBlocked && recovery.pendingMerge && <div role="alert" className="p-3 border border-amber-500/30 bg-amber-500/5 text-amber-200 text-xs">
                 <p>This cart merge needs support recovery. Your request and items remain saved.</p>

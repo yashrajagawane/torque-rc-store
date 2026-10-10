@@ -144,7 +144,7 @@ export function CheckoutPage() {
         key: payload.keyId,
         amount: payload.amount,
         currency: payload.currency,
-        name: 'RC MEGA',
+        name: 'Fly RC Hobbies',
         description: `Order #${orderId}`,
         order_id: payload.razorpayOrderId,
         theme: { color: '#ff5a1f' },

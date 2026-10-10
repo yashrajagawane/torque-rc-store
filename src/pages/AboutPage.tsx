@@ -57,7 +57,7 @@ export const AboutPage = () => {
         <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground mb-6 [word-spacing:0.15em]">
           <Link to="/" className="hover:text-white transition-colors">Home</Link>
           <span>/</span>
-          <span className="text-white">About RC MEGA</span>
+          <span className="text-white">About Fly RC Hobbies</span>
         </div>
 
         {/* Hero Banner */}
@@ -70,7 +70,7 @@ export const AboutPage = () => {
             BUILT FOR UNCOMPROMISING CONTROL.
           </h1>
           <p className="text-muted-foreground text-base sm:text-lg md:text-xl max-w-3xl leading-relaxed italic border-l-2 border-accent pl-6 [word-spacing:0.12em]">
-            RC MEGA was established by competitive RC rock crawling champions and high-speed speed-run builders who demanded real engineering, factory parts availability, and honest enthusiast guidance in the radio control world.
+            Fly RC Hobbies was established by competitive RC rock crawling champions and high-speed speed-run builders who demanded real engineering, factory parts availability, and honest enthusiast guidance in the radio control world.
           </p>
         </div>
 
@@ -99,7 +99,7 @@ export const AboutPage = () => {
             </h2>
             <div className="space-y-4 text-muted-foreground text-sm sm:text-base leading-relaxed italic [word-spacing:0.12em]">
               <p>
-                In an era where department stores sell disposable plastic toys with non-replaceable parts, RC MEGA stands for mechanical permanence. Every machine we carry is a genuine, modular, hobby-grade vehicle with proportional digital radio control, oil-filled suspension, steel driveshafts, and completely modular electronics.
+                In an era where department stores sell disposable plastic toys with non-replaceable parts, Fly RC Hobbies stands for mechanical permanence. Every machine we carry is a genuine, modular, hobby-grade vehicle with proportional digital radio control, oil-filled suspension, steel driveshafts, and completely modular electronics.
               </p>
               <p>
                 Whether you are traversing a remote mountain riverbed with an RGT 1:10 scale rock crawler, executing 80 km/h drift entries with an MJX Hyper Go brushless chassis, or operating full hydraulic heavy construction equipment, our team ensures your machine is calibrated to deliver peak performance from day one.
@@ -109,7 +109,7 @@ export const AboutPage = () => {
 
           <div className="glass-card p-8 border border-white/10 bg-[#080808] relative overflow-hidden">
             <h3 className="text-xl font-bold uppercase tracking-wider mb-6 italic text-white [word-spacing:0.2em]">
-              THE RC MEGA STANDARD
+              THE FLY RC HOBBIES STANDARD
             </h3>
             <ul className="space-y-4 text-sm">
               {[

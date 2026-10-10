@@ -7,6 +7,7 @@ import { useWishlistStore } from '../../store/wishlistStore';
 import { CartDrawer } from '../cart/CartDrawer';
 import { SearchOverlay } from '../search/SearchOverlay';
 import { useVisibleCart } from '../../cart/useVisibleCart';
+import { BrandLogo } from './BrandLogo';
 
 export const AnnouncementBar = () => {
   return (
@@ -73,13 +74,8 @@ export const Header = ({ onOpenCart, onOpenSearch }: HeaderProps) => {
         <div className="container mx-auto px-4 md:px-6 flex items-center justify-between">
           {/* Left: Logo */}
           <div className="flex items-center gap-6 md:gap-8">
-            <Link to="/" className="flex items-center gap-2 group">
-              <div className="w-8 h-8 md:w-9 md:h-9 bg-primary flex items-center justify-center rounded-sm skew-x-[-10deg] group-hover:bg-accent transition-colors border border-white/10">
-                <span className="text-white font-black text-base md:text-lg skew-x-[10deg]">RM</span>
-              </div>
-              <span className="text-lg md:text-xl font-black tracking-normal text-white uppercase italic [word-spacing:0.15em]">
-                RC<span className="text-accent">MEGA</span>
-              </span>
+            <Link to="/" className="group" aria-label="Fly RC Hobbies home">
+              <BrandLogo />
             </Link>
 
             {/* Desktop Nav */}

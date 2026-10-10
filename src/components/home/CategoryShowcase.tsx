@@ -1,43 +1,49 @@
 import { ArrowRight } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
+import carsImage from '../../assets/images/category_rc_cars_1790434413337.jpg';
+import crawlersImage from '../../assets/images/category_rc_crawlers_1790434426807.jpg';
+import boatsImage from '../../assets/images/category_rc_boats_1790434439161.jpg';
+import constructionImage from '../../assets/images/category_construction_1790434453033.jpg';
+import partsImage from '../../assets/images/category_parts_1790434472723.jpg';
+import accessoriesImage from '../../assets/images/category_accessories_rc_1790434488572.jpg';
 
 const CATEGORIES = [
   {
     name: 'RC CARS',
     slug: 'bashers',
     description: 'On-road • Off-road • Drift',
-    image: '/src/assets/images/category_rc_cars_1790434413337.jpg'
+    image: carsImage
   },
   {
     name: 'RC CRAWLERS',
     slug: 'crawlers',
     description: 'Rock crawling • Trail • Scale',
-    image: '/src/assets/images/category_rc_crawlers_1790434426807.jpg'
+    image: crawlersImage
   },
   {
     name: 'RC BOATS',
     slug: 'marine',
     description: 'Speed • Racing • Marine',
-    image: '/src/assets/images/category_rc_boats_1790434439161.jpg'
+    image: boatsImage
   },
   {
     name: 'CONSTRUCTION',
     slug: 'construction',
     description: 'Excavators • Dumpers • Dozers',
-    image: '/src/assets/images/category_construction_1790434453033.jpg'
+    image: constructionImage
   },
   {
     name: 'SPARE PARTS',
     slug: 'spare-parts',
     description: 'Gears • Motors • Electronics',
-    image: '/src/assets/images/category_parts_1790434472723.jpg'
+    image: partsImage
   },
   {
     name: 'ACCESSORIES',
     slug: 'accessories',
     description: 'Batteries • Tools • Upgrades',
-    image: '/src/assets/images/category_accessories_rc_1790434488572.jpg'
+    image: accessoriesImage
   }
 ];
 

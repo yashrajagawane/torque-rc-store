@@ -151,7 +151,7 @@ export const ProductDetailPage = ({ slug }: { slug: string }) => {
 
               <div className="flex flex-col sm:flex-row items-stretch gap-4">
                  <a
-                   href={`https://wa.me/?text=${encodeURIComponent(`Hello RC MEGA Pit Crew! I want to order/inquire about: ${product.name} (SKU: ${product.slug}). Please provide delivery and payment details.`)}`}
+                   href={`https://wa.me/?text=${encodeURIComponent(`Hello Fly RC Hobbies Pit Crew! I want to order/inquire about: ${product.name} (SKU: ${product.slug}). Please provide delivery and payment details.`)}`}
                    target="_blank"
                    rel="noopener noreferrer"
                    className="flex-grow bg-[#111] text-white border border-emerald-500/40 hover:border-emerald-500 hover:bg-emerald-500 hover:text-black font-black uppercase italic tracking-widest h-14 rounded-sm skew-x-[-10deg] flex items-center justify-center transition-all group"

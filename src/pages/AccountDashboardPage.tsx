@@ -27,7 +27,7 @@ interface CustomerOrder {
 
 function displayName(user: User) {
   const value = user.user_metadata?.display_name;
-  return typeof value === 'string' && value.trim() ? value.trim() : user.email || 'RC MEGA customer';
+  return typeof value === 'string' && value.trim() ? value.trim() : user.email || 'Fly RC Hobbies customer';
 }
 
 export const AccountDashboardPage = () => {

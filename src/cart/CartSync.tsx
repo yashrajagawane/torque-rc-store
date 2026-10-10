@@ -87,7 +87,7 @@ export function decideCartSync(input: {
 }
 
 export function legacyRecoveryMessage(key: string) {
-  return `A previous cart merge has no saved request payload and cannot be retried safely. Your cart data is preserved. Contact RC MEGA support with recovery reference ${key}; do not clear this browser's saved data.`;
+  return `A previous cart merge has no saved request payload and cannot be retried safely. Your cart data is preserved. Contact Fly RC Hobbies support with recovery reference ${key}; do not clear this browser's saved data.`;
 }
 
 export function prepareCartSync(

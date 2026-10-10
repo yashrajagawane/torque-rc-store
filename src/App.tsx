@@ -52,7 +52,7 @@ const HomePage = () => (
             READY TO DOMINATE ANY TERRAIN?
           </h2>
           <p className="text-white/90 text-sm sm:text-base md:text-lg mb-8 italic font-medium leading-relaxed [word-spacing:0.12em]">
-            Join thousands of RC enthusiasts who trust RC MEGA for precision machines and certified pit crew support.
+            Join thousands of RC enthusiasts who trust Fly RC Hobbies for precision machines and certified pit crew support.
           </p>
           <a href="/contact" className="bg-black text-white font-black uppercase italic tracking-wider px-8 py-4 rounded-sm skew-x-[-10deg] transition-all hover:bg-white hover:text-black inline-block [word-spacing:0.15em]">
             <span className="skew-x-[10deg] block">Get Expert Advice</span>
@@ -61,7 +61,7 @@ const HomePage = () => (
       </div>
       
       <div className="absolute top-1/2 right-0 -translate-y-1/2 translate-x-1/4 opacity-5 pointer-events-none whitespace-nowrap">
-        <span className="text-[16vw] font-black italic tracking-widest uppercase leading-none">RC MEGA</span>
+        <span className="text-[16vw] font-black italic tracking-widest uppercase leading-none">FLY RC HOBBIES</span>
       </div>
     </section>
   </>
