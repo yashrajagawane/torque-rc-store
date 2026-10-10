@@ -1,5 +1,7 @@
 import 'dotenv/config';
 import { env as processEnv } from 'node:process';
+import { X509Certificate } from 'node:crypto';
+import { createSecureContext } from 'node:tls';
 
 export type DatabaseMode = 'runtime' | 'migrations';
 
@@ -10,7 +12,7 @@ export interface DatabaseSettings {
   database?: string;
   user?: string;
   password?: string;
-  ssl: boolean;
+  ssl: boolean | { ca: string; rejectUnauthorized: true };
 }
 
 function isLocalHost(host: string): boolean {
@@ -18,12 +20,33 @@ function isLocalHost(host: string): boolean {
   return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1';
 }
 
-function resolveSsl(host: string, env: Record<string, string | undefined>): boolean {
+function validateCaBundle(ca: string): void {
+  const blocks = ca.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g);
+  if (!blocks?.length || blocks.join('').replace(/\s/g, '') !== ca.replace(/\s/g, '')) {
+    throw new Error('DATABASE_CA_CERT must contain a valid PEM CA certificate bundle.');
+  }
+  try {
+    for (const block of blocks) {
+      if (!new X509Certificate(block).ca) throw new Error('Certificate is not a CA certificate.');
+    }
+    createSecureContext({ ca });
+  } catch {
+    throw new Error('DATABASE_CA_CERT must contain a valid PEM CA certificate bundle.');
+  }
+}
+
+function resolveSsl(host: string, env: Record<string, string | undefined>): DatabaseSettings['ssl'] {
   const setting = (env.DATABASE_SSL || 'auto').toLowerCase();
-  if (setting === 'true') return true;
-  if (setting === 'false') return false;
-  if (setting === 'auto') return !isLocalHost(host);
-  throw new Error('DATABASE_SSL must be one of: auto, true, false.');
+  const ca = env.DATABASE_CA_CERT?.trim();
+  if (setting === 'false') {
+    if (ca) throw new Error('DATABASE_CA_CERT requires DATABASE_SSL=true or auto.');
+    return false;
+  }
+  const sslEnabled = setting === 'true' || (setting === 'auto' && !isLocalHost(host));
+  if (!sslEnabled) return false;
+  if (!ca) return true;
+  validateCaBundle(ca);
+  return { ca, rejectUnauthorized: true };
 }
 
 /**

@@ -399,6 +399,7 @@ baseline; do not apply it to production without a reviewed backup/staging run.
 | `DATABASE_URL` | One of this or all `SQL_*` runtime values | Preferred PostgreSQL URL for the Express runtime; also used by migrations unless a separate migration URL is set. |
 | `MIGRATION_DATABASE_URL` | Optional | Separate PostgreSQL URL for Drizzle Kit migrations; takes precedence over `DATABASE_URL` for migrations only. |
 | `DATABASE_SSL` | Optional | `auto`, `true`, or `false`; remote hosts use SSL in `auto` mode. |
+| `DATABASE_CA_CERT` | Optional server-only | PEM CA bundle downloaded from the provider's official database SSL settings when Node's default trust store cannot validate the remote chain. Requires SSL, is never exposed to Vite, and must not be committed. |
 | `SQL_HOST` | Required if no `DATABASE_URL` | PostgreSQL host. |
 | `SQL_PORT` | Optional | PostgreSQL port; defaults to `5432`. |
 | `SQL_DB_NAME` | Required if no `DATABASE_URL` | PostgreSQL database name. |
