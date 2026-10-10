@@ -4,12 +4,11 @@ export const BrandLogo = () => (
       <span className="absolute -right-1 top-1 h-0.5 w-5 rotate-[-28deg] bg-black/45" />
       <span className="absolute -right-2 top-4 h-0.5 w-6 rotate-[-28deg] bg-black/35" />
       <svg viewBox="0 0 32 32" aria-hidden="true" className="h-6 w-6 skew-x-[10deg] -rotate-6">
-        <path d="M3 20h3l3-6 6-3h7l5 5 2 1v5h-3a3 3 0 0 1-6 0h-7a3 3 0 0 1-6 0H3z" fill="currentColor" />
-        <path d="m11 14 4-2h6l3 3h-9z" fill="#ff5708" />
-        <circle cx="9" cy="22" r="2.7" fill="#ff5708" stroke="currentColor" strokeWidth="1.5" />
-        <circle cx="23" cy="22" r="2.7" fill="#ff5708" stroke="currentColor" strokeWidth="1.5" />
-        <path d="M5 17H1M6 14H3" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-        <path d="M27 13 30 11" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+        <path d="M3 18h3l2-5h5l3-4h7l4 4h2l2 5v3h-3a3.5 3.5 0 0 1-7 0h-7a3.5 3.5 0 0 1-7 0H3z" fill="currentColor" />
+        <path d="M14 13h8l3 3h-12zM11 11l3-4h6l2 4" fill="none" stroke="#ff5708" strokeWidth="1.5" strokeLinejoin="round" />
+        <circle cx="9.5" cy="21" r="3.2" fill="#ff5708" stroke="currentColor" strokeWidth="1.7" />
+        <circle cx="23.5" cy="21" r="3.2" fill="#ff5708" stroke="currentColor" strokeWidth="1.7" />
+        <path d="M6 16H2M27 10l3-3" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
       </svg>
     </span>
     <span className="flex flex-col uppercase italic tracking-tight">
