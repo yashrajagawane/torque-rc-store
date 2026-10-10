@@ -68,12 +68,15 @@ function supabaseAdminDefaults() {
   ]);
 }
 function applicationOwnerDefaults(owner = 'postgres') {
-  return ['anon', 'authenticated'].flatMap((grantee) => [
+  return ['service_role', 'anon', 'authenticated'].flatMap((grantee) => [
     ...['DELETE', 'INSERT', 'MAINTAIN', 'REFERENCES', 'SELECT', 'TRIGGER', 'TRUNCATE', 'UPDATE']
       .map((privilege) => ({ owner, schema: 'public', objectType: 'table' as const, grantee, privilege })),
     ...['SELECT', 'UPDATE', 'USAGE']
       .map((privilege) => ({ owner, schema: 'public', objectType: 'sequence' as const, grantee, privilege })),
   ]);
+}
+function applicationOwnerServiceDefaults(owner = 'postgres') {
+  return applicationOwnerDefaults(owner).filter((row) => row.grantee === 'service_role');
 }
 const baseEnv: Record<string, string | undefined> = {
   SUPABASE_STAGING_ENABLED: 'true',
@@ -123,7 +126,7 @@ function state(deps: StagingRunnerDependencies, contact = false, securityApplied
     supabaseMigrationRecords: 0,
     dataApiRoles: ['anon', 'authenticated'],
     dataApiRoleAudit: ['anon', 'authenticated'].map((role) => ({ role, superuser: false, bypassRls: false, inheritsRuntimeOwner: false, memberOfRuntimeOwner: false, publicUsage: true, publicCreate: false, authUsage: false, authCreate: false, storageUsage: false, storageCreate: false, drizzleUsage: false, drizzleCreate: false, applicationTablePrivileges: [], applicationColumnPrivileges: [], applicationSequencePrivileges: [], directApplicationTableAcl: [], directApplicationColumnAcl: [], directApplicationSequenceAcl: [], globalDefaultTablePrivileges: [], globalDefaultSequencePrivileges: [], schemaDefaultTablePrivileges: [], schemaDefaultSequencePrivileges: [] })),
-    defaultAclInventory: supabaseAdminDefaults(),
+    defaultAclInventory: [...applicationOwnerServiceDefaults(), ...supabaseAdminDefaults()],
     applicationTables: tables,
     applicationColumns: Object.fromEntries(Object.entries(columns).map(([table, values]) => [table, values.map((column) => ({
       ...column,
@@ -179,7 +182,7 @@ function preparationHarness(options: { afterAcl?: ReturnType<typeof applicationO
         aclReads += 1;
         const rows = aclReads === 1
           ? [...applicationOwnerDefaults(), ...supabaseAdminDefaults()]
-          : [...(options.afterAcl ?? []), ...supabaseAdminDefaults()];
+          : [...(options.afterAcl ?? applicationOwnerServiceDefaults()), ...supabaseAdminDefaults()];
         return { rows: rows as Row[] };
       }
       throw new Error('Unexpected SQL in injected preparation test.');
@@ -961,16 +964,23 @@ describe('Supabase staging initialization guard', () => {
 
   it('allows only known platform defaults and the narrowly scoped application-owner defaults during preparation', () => {
     assert.equal(supabaseAdminDefaults().length, 44);
-    assert.doesNotThrow(() => assertStagingDefaultAclInventory(supabaseAdminDefaults(), 'postgres'));
+    assert.equal(applicationOwnerDefaults().length, 33);
+    assert.equal(applicationOwnerServiceDefaults().length, 11);
+    assert.doesNotThrow(() => assertStagingDefaultAclInventory([...applicationOwnerServiceDefaults(), ...supabaseAdminDefaults()], 'postgres'));
     assert.doesNotThrow(() => assertStagingDefaultAclInventory([...supabaseAdminDefaults(), ...applicationOwnerDefaults()], 'postgres', true));
     assert.throws(() => assertStagingDefaultAclInventory([...supabaseAdminDefaults(), ...applicationOwnerDefaults()], 'postgres'));
     assert.throws(() => assertStagingDefaultAclInventory([...supabaseAdminDefaults(), ...applicationOwnerDefaults('other_owner')], 'postgres', true));
     assert.throws(() => assertStagingDefaultAclInventory([...supabaseAdminDefaults(), { ...applicationOwnerDefaults()[0]!, schema: '<global>' }], 'postgres', true));
     assert.throws(() => assertStagingDefaultAclInventory([...supabaseAdminDefaults(), { ...applicationOwnerDefaults()[0]!, objectType: 'unknown' as 'table' }], 'postgres', true));
     assert.throws(() => assertStagingDefaultAclInventory([...supabaseAdminDefaults(), applicationOwnerDefaults()[0]!, applicationOwnerDefaults()[0]!], 'postgres', true));
-    assert.throws(() => assertStagingDefaultAclInventory(supabaseAdminDefaults().slice(1), 'postgres'));
+    assert.throws(() => assertStagingDefaultAclInventory([...applicationOwnerServiceDefaults(), ...supabaseAdminDefaults().slice(1)], 'postgres'));
     assert.throws(() => assertStagingDefaultAclInventory([...supabaseAdminDefaults(), { ...supabaseAdminDefaults()[0]!, privilege: 'CREATE' }], 'postgres'));
     assert.throws(() => assertStagingDefaultAclInventory([...supabaseAdminDefaults(), { ...supabaseAdminDefaults()[0]!, owner: 'unknown_owner' }], 'postgres'));
+    assert.throws(() => assertStagingDefaultAclInventory([...applicationOwnerServiceDefaults().slice(1), ...supabaseAdminDefaults()], 'postgres'));
+    assert.throws(() => assertStagingDefaultAclInventory([
+      ...applicationOwnerServiceDefaults().map((row, index) => index === 0 ? { ...row, privilege: 'CREATE' } : row),
+      ...supabaseAdminDefaults(),
+    ], 'postgres'));
   });
 
   it('rolls back when postconditions retain an application-owner default and preserves platform defaults', async () => {
@@ -1024,7 +1034,11 @@ describe('Supabase staging initialization guard', () => {
     assert.ok(lines.some((line) => line.includes('PASS connection identity validation')));
     assert.ok(lines.some((line) => line.includes('PASS target schema and search-path validation')));
     assert.ok(lines.some((line) => line.includes('PASS required schema validation')));
-    assert.ok(lines.some((line) => line.includes('PASS application objects and migration-history absence')));
+    assert.ok(lines.some((line) => line.includes('PASS drizzle schema absence')));
+    assert.ok(lines.some((line) => line.includes('PASS Drizzle migration-table absence')));
+    assert.ok(lines.some((line) => line.includes('PASS supabase_migrations schema absence')));
+    assert.ok(lines.some((line) => line.includes('PASS Supabase migration-table absence')));
+    assert.ok(lines.some((line) => line.includes('PASS conflicting application baseline objects absence')));
     assert.ok(lines.some((line) => line.includes('PASS migration-history eligibility')));
     assert.ok(lines.some((line) => line.includes('PASS public-object inventory validation')));
     assert.ok(lines.some((line) => line.includes('PASS API-role validation')));
@@ -1046,6 +1060,31 @@ describe('Supabase staging initialization guard', () => {
     assert.ok(lines.some((line) => line.includes('FAIL public-object inventory validation')));
     assert.ok(lines.some((line) => line.includes('PASS API-role validation')));
     assert.equal(harness.calls.some((call) => /^(ALTER|CREATE|DROP|GRANT|REVOKE)\b/i.test(call)), false);
+  });
+
+  it('reports migration-schema/history and application-object absence predicates separately', async () => {
+    const historyHarness = preparationHarness({ readOnly: true, existingHistory: true });
+    const historyLines: string[] = [];
+    const historyCode = await runSupabaseStagingDefaultPrivilegeDiagnostic(
+      ['--confirm-staging-default-privilege-diagnostic'],
+      { ...historyHarness.env, SUPABASE_STAGING_DEFAULT_PRIVILEGE_DIAGNOSTIC_CONFIRMATION: 'I_CONFIRM_READ_ONLY_STAGING_DEFAULT_PRIVILEGE_DIAGNOSTIC' },
+      historyHarness.depsForRun, (line) => historyLines.push(line),
+    );
+    assert.equal(historyCode, 1);
+    assert.ok(historyLines.some((line) => line.includes('FAIL drizzle schema absence')));
+    assert.ok(historyLines.some((line) => line.includes('FAIL Drizzle migration-table absence')));
+    assert.ok(historyLines.some((line) => line.includes('PASS supabase_migrations schema absence')));
+    assert.ok(historyLines.some((line) => line.includes('PASS Supabase migration-table absence')));
+
+    const applicationHarness = preparationHarness({ readOnly: true, applicationTables: ['products'] });
+    const applicationLines: string[] = [];
+    const applicationCode = await runSupabaseStagingDefaultPrivilegeDiagnostic(
+      ['--confirm-staging-default-privilege-diagnostic'],
+      { ...applicationHarness.env, SUPABASE_STAGING_DEFAULT_PRIVILEGE_DIAGNOSTIC_CONFIRMATION: 'I_CONFIRM_READ_ONLY_STAGING_DEFAULT_PRIVILEGE_DIAGNOSTIC' },
+      applicationHarness.depsForRun, (line) => applicationLines.push(line),
+    );
+    assert.equal(applicationCode, 1);
+    assert.ok(applicationLines.some((line) => line.includes('FAIL conflicting application baseline objects absence')));
   });
 
   it('fails the diagnostic before catalog checkpoints when read-only status is false', async () => {

@@ -569,19 +569,29 @@ export function assertStagingDefaultAclInventory(
   if (new Set(actualKeys).size !== actualKeys.length) throw new Error('Default ACL inventory contains duplicate entries.');
 
   const applicationRows = inventory.filter((row) => row.owner === applicationOwner);
-  const validApplicationPrivileges = new Set([
-    'DELETE', 'INSERT', 'MAINTAIN', 'REFERENCES', 'SELECT', 'TRIGGER', 'TRUNCATE', 'UPDATE',
-    'USAGE',
-  ]);
-  if (applicationRows.some((row) => row.schema !== 'public'
-    || !['anon', 'authenticated'].includes(row.grantee)
-    || !['table', 'sequence'].includes(row.objectType)
-    || (row.objectType === 'table' && !validApplicationPrivileges.has(row.privilege))
-    || (row.objectType === 'sequence' && !['SELECT', 'UPDATE', 'USAGE'].includes(row.privilege)))) {
-    throw new Error('Application-owner default ACL state is unexpected; manual review is required.');
-  }
-  if (!allowApplicationOwnerApiDefaults && applicationRows.length) {
-    throw new Error('Application-owner public defaults still grant privileges to Data API roles.');
+  const applicationServiceDefaults = [
+    ...['DELETE', 'INSERT', 'MAINTAIN', 'REFERENCES', 'SELECT', 'TRIGGER', 'TRUNCATE', 'UPDATE']
+      .map((privilege) => ({ owner: applicationOwner, schema: 'public', objectType: 'table' as const, grantee: 'service_role', privilege })),
+    ...['SELECT', 'UPDATE', 'USAGE']
+      .map((privilege) => ({ owner: applicationOwner, schema: 'public', objectType: 'sequence' as const, grantee: 'service_role', privilege })),
+  ];
+  const applicationApiDefaults = [
+    ...['anon', 'authenticated'].flatMap((grantee) => [
+      ...['DELETE', 'INSERT', 'MAINTAIN', 'REFERENCES', 'SELECT', 'TRIGGER', 'TRUNCATE', 'UPDATE']
+        .map((privilege) => ({ owner: applicationOwner, schema: 'public', objectType: 'table' as const, grantee, privilege })),
+      ...['SELECT', 'UPDATE', 'USAGE']
+        .map((privilege) => ({ owner: applicationOwner, schema: 'public', objectType: 'sequence' as const, grantee, privilege })),
+    ]),
+  ];
+  const expectedApplicationRows = allowApplicationOwnerApiDefaults
+    ? [...applicationServiceDefaults, ...applicationApiDefaults]
+    : applicationServiceDefaults;
+  const applicationKeys = applicationRows.map(canonical).sort();
+  const expectedApplicationKeys = expectedApplicationRows.map(canonical).sort();
+  if (JSON.stringify(applicationKeys) !== JSON.stringify(expectedApplicationKeys)) {
+    throw new Error(allowApplicationOwnerApiDefaults
+      ? 'Application-owner default ACL state is unexpected; manual review is required.'
+      : 'Application-owner public defaults still grant privileges to Data API roles or differ from the preserved service-role snapshot.');
   }
 
   const platformRows = inventory.filter((row) => row.owner === 'supabase_admin');

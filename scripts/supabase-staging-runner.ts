@@ -564,7 +564,8 @@ export async function runSupabaseStagingDefaultPrivilegePreparation(
     const beforeAclResult = await client.query<NonNullable<StagingCatalogState['defaultAclInventory']>[number]>(defaultAclInventorySql);
     const beforeAcl = beforeAclResult.rows;
     assertStagingDefaultAclInventory(beforeAcl, settings.runtimeUser, true);
-    beforeApplicationCount = beforeAcl.filter((row) => row.owner === settings.runtimeUser).length;
+    beforeApplicationCount = beforeAcl.filter((row) => row.owner === settings.runtimeUser
+      && (row.grantee === 'anon' || row.grantee === 'authenticated')).length;
 
     stage = 'DEFAULT_ACL_REVOKE_FAILED';
     await client.query('ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA public REVOKE ALL ON TABLES FROM anon');
@@ -579,7 +580,8 @@ export async function runSupabaseStagingDefaultPrivilegePreparation(
     const platformBefore = beforeAcl.filter((row) => row.owner === 'supabase_admin').map((row) => JSON.stringify(row)).sort();
     const platformAfter = afterAcl.filter((row) => row.owner === 'supabase_admin').map((row) => JSON.stringify(row)).sort();
     if (JSON.stringify(platformBefore) !== JSON.stringify(platformAfter)) throw new Error('platform default ACL state changed');
-    afterApplicationCount = afterAcl.filter((row) => row.owner === settings.runtimeUser).length;
+    afterApplicationCount = afterAcl.filter((row) => row.owner === settings.runtimeUser
+      && (row.grantee === 'anon' || row.grantee === 'authenticated')).length;
     if (afterApplicationCount !== 0) throw new Error('application owner defaults remain');
 
     stage = 'COMMIT_FAILED';
@@ -654,9 +656,25 @@ export async function runSupabaseStagingDefaultPrivilegeDiagnostic(
       if (!schemaState) throw new Error('schema state unavailable');
       assertStagingRequiredSchemas({ public: schemaState.public, auth: schemaState.auth, storage: schemaState.storage, drizzle: schemaState.drizzle, supabaseMigrations: schemaState.supabaseMigrations });
     });
-    await checkpoint('application objects and migration-history absence', async () => {
+    await checkpoint('drizzle schema absence', async () => {
       if (!schemaState) throw new Error('schema state unavailable');
-      if (schemaState.drizzle || schemaState.drizzleHistory || schemaState.supabaseMigrations || schemaState.supabaseHistory || schemaState.applicationTables.length) throw new Error('existing application objects or migration history');
+      if (schemaState.drizzle) throw new Error('drizzle schema exists');
+    });
+    await checkpoint('Drizzle migration-table absence', async () => {
+      if (!schemaState) throw new Error('schema state unavailable');
+      if (schemaState.drizzleHistory) throw new Error('Drizzle migration table exists');
+    });
+    await checkpoint('supabase_migrations schema absence', async () => {
+      if (!schemaState) throw new Error('schema state unavailable');
+      if (schemaState.supabaseMigrations) throw new Error('Supabase migration schema exists');
+    });
+    await checkpoint('Supabase migration-table absence', async () => {
+      if (!schemaState) throw new Error('schema state unavailable');
+      if (schemaState.supabaseHistory) throw new Error('Supabase migration table exists');
+    });
+    await checkpoint('conflicting application baseline objects absence', async () => {
+      if (!schemaState) throw new Error('schema state unavailable');
+      if (schemaState.applicationTables.length) throw new Error('application baseline objects exist');
     });
     stage = 'MIGRATION_HISTORY_FAILED';
     await checkpoint('migration-history eligibility', async () => {
