@@ -544,7 +544,7 @@ export function assertStagingDataApiPrivileges(state: Pick<StagingCatalogState, 
 }
 
 const platformDefaultPrivileges = [
-  ...['anon', 'authenticated'].flatMap((grantee) => [
+  ...['anon', 'authenticated', 'postgres', 'service_role'].flatMap((grantee) => [
     ...['DELETE', 'INSERT', 'MAINTAIN', 'REFERENCES', 'SELECT', 'TRIGGER', 'TRUNCATE', 'UPDATE']
       .map((privilege) => ({ owner: 'supabase_admin', schema: 'public', objectType: 'table' as const, grantee, privilege })),
     ...['SELECT', 'UPDATE', 'USAGE']

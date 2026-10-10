@@ -60,7 +60,7 @@ const approvedPlatformTriggers = [
   { name: 'pgrst_drop_watch', owner: 'supabase_admin', enabled: 'O', event: 'sql_drop', tags: null, handlerSchema: 'extensions', handlerName: 'pgrst_drop_watch', ...platformHandler, handlerSourceLength: 412, handlerSourceMd5: 'bc09cc3003d66f91844af4cb05e203b7', handlerObjectId: '90006', triggerHandlerObjectId: '90006' },
 ];
 function supabaseAdminDefaults() {
-  return ['anon', 'authenticated'].flatMap((grantee) => [
+  return ['anon', 'authenticated', 'postgres', 'service_role'].flatMap((grantee) => [
     ...['DELETE', 'INSERT', 'MAINTAIN', 'REFERENCES', 'SELECT', 'TRIGGER', 'TRUNCATE', 'UPDATE']
       .map((privilege) => ({ owner: 'supabase_admin', schema: 'public', objectType: 'table' as const, grantee, privilege })),
     ...['SELECT', 'UPDATE', 'USAGE']
@@ -960,6 +960,7 @@ describe('Supabase staging initialization guard', () => {
   });
 
   it('allows only known platform defaults and the narrowly scoped application-owner defaults during preparation', () => {
+    assert.equal(supabaseAdminDefaults().length, 44);
     assert.doesNotThrow(() => assertStagingDefaultAclInventory(supabaseAdminDefaults(), 'postgres'));
     assert.doesNotThrow(() => assertStagingDefaultAclInventory([...supabaseAdminDefaults(), ...applicationOwnerDefaults()], 'postgres', true));
     assert.throws(() => assertStagingDefaultAclInventory([...supabaseAdminDefaults(), ...applicationOwnerDefaults()], 'postgres'));
@@ -967,6 +968,9 @@ describe('Supabase staging initialization guard', () => {
     assert.throws(() => assertStagingDefaultAclInventory([...supabaseAdminDefaults(), { ...applicationOwnerDefaults()[0]!, schema: '<global>' }], 'postgres', true));
     assert.throws(() => assertStagingDefaultAclInventory([...supabaseAdminDefaults(), { ...applicationOwnerDefaults()[0]!, objectType: 'unknown' as 'table' }], 'postgres', true));
     assert.throws(() => assertStagingDefaultAclInventory([...supabaseAdminDefaults(), applicationOwnerDefaults()[0]!, applicationOwnerDefaults()[0]!], 'postgres', true));
+    assert.throws(() => assertStagingDefaultAclInventory(supabaseAdminDefaults().slice(1), 'postgres'));
+    assert.throws(() => assertStagingDefaultAclInventory([...supabaseAdminDefaults(), { ...supabaseAdminDefaults()[0]!, privilege: 'CREATE' }], 'postgres'));
+    assert.throws(() => assertStagingDefaultAclInventory([...supabaseAdminDefaults(), { ...supabaseAdminDefaults()[0]!, owner: 'unknown_owner' }], 'postgres'));
   });
 
   it('rolls back when postconditions retain an application-owner default and preserves platform defaults', async () => {
@@ -1017,7 +1021,10 @@ describe('Supabase staging initialization guard', () => {
       (line) => lines.push(line),
     );
     assert.equal(code, 0);
-    assert.ok(lines.some((line) => line.includes('PASS schema-state validation')));
+    assert.ok(lines.some((line) => line.includes('PASS connection identity validation')));
+    assert.ok(lines.some((line) => line.includes('PASS target schema and search-path validation')));
+    assert.ok(lines.some((line) => line.includes('PASS required schema validation')));
+    assert.ok(lines.some((line) => line.includes('PASS application objects and migration-history absence')));
     assert.ok(lines.some((line) => line.includes('PASS migration-history eligibility')));
     assert.ok(lines.some((line) => line.includes('PASS public-object inventory validation')));
     assert.ok(lines.some((line) => line.includes('PASS API-role validation')));

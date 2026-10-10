@@ -641,14 +641,22 @@ export async function runSupabaseStagingDefaultPrivilegeDiagnostic(
     const identity = identityResult.rows[0];
     if (!identity || identity.transactionReadOnly !== true) throw new Error('read-only transaction was not confirmed');
     stage = 'SCHEMA_STATE_FAILED';
-    await checkpoint('schema-state validation', async () => {
+    await checkpoint('connection identity validation', async () => {
       assertStagingIdentity({ ...identity, serverPort: Number(identity.serverPort) }, settings);
-      if (identity.user !== settings.runtimeUser || identity.currentSchema !== 'public' || identity.searchPath.replaceAll('"', '').split(',').map((part) => part.trim()).join(',') !== 'public') throw new Error('identity mismatch');
-      const result = await client.query<{ public: boolean; auth: boolean; storage: boolean; drizzle: boolean; supabaseMigrations: boolean; drizzleHistory: boolean; supabaseHistory: boolean; applicationTables: string[] }>(`SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='public') AS public, EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='auth') AS auth, EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='storage') AS storage, EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='drizzle') AS drizzle, EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='supabase_migrations') AS "supabaseMigrations", to_regclass('drizzle.__drizzle_migrations') IS NOT NULL AS "drizzleHistory", to_regclass('supabase_migrations.schema_migrations') IS NOT NULL AS "supabaseHistory", ARRAY(SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','S','f') AND c.relname=ANY($1::text[])) AS "applicationTables"`, [dependencies.applicationTableNames]);
-      const state = result.rows[0];
-      if (!state) throw new Error('schema state unavailable');
-      assertStagingRequiredSchemas({ public: state.public, auth: state.auth, storage: state.storage, drizzle: state.drizzle, supabaseMigrations: state.supabaseMigrations });
-      if (state.drizzle || state.drizzleHistory || state.supabaseMigrations || state.supabaseHistory || state.applicationTables.length) throw new Error('existing application objects or migration history');
+      if (identity.user !== settings.runtimeUser) throw new Error('effective owner mismatch');
+    });
+    await checkpoint('target schema and search-path validation', async () => {
+      if (identity.currentSchema !== 'public' || identity.searchPath.replaceAll('"', '').split(',').map((part) => part.trim()).join(',') !== 'public') throw new Error('application schema or search path mismatch');
+    });
+    const schemaResult = await client.query<{ public: boolean; auth: boolean; storage: boolean; drizzle: boolean; supabaseMigrations: boolean; drizzleHistory: boolean; supabaseHistory: boolean; applicationTables: string[] }>(`SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='public') AS public, EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='auth') AS auth, EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='storage') AS storage, EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='drizzle') AS drizzle, EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='supabase_migrations') AS "supabaseMigrations", to_regclass('drizzle.__drizzle_migrations') IS NOT NULL AS "drizzleHistory", to_regclass('supabase_migrations.schema_migrations') IS NOT NULL AS "supabaseHistory", ARRAY(SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','S','f') AND c.relname=ANY($1::text[])) AS "applicationTables"`, [dependencies.applicationTableNames]);
+    const schemaState = schemaResult.rows[0];
+    await checkpoint('required schema validation', async () => {
+      if (!schemaState) throw new Error('schema state unavailable');
+      assertStagingRequiredSchemas({ public: schemaState.public, auth: schemaState.auth, storage: schemaState.storage, drizzle: schemaState.drizzle, supabaseMigrations: schemaState.supabaseMigrations });
+    });
+    await checkpoint('application objects and migration-history absence', async () => {
+      if (!schemaState) throw new Error('schema state unavailable');
+      if (schemaState.drizzle || schemaState.drizzleHistory || schemaState.supabaseMigrations || schemaState.supabaseHistory || schemaState.applicationTables.length) throw new Error('existing application objects or migration history');
     });
     stage = 'MIGRATION_HISTORY_FAILED';
     await checkpoint('migration-history eligibility', async () => {
