@@ -282,6 +282,7 @@ export async function runSupabaseStagingPreflight(
     const autoRlsChecks = supabaseAutomaticRlsDiagnostics(state);
     report(`Automatic RLS property checks: ${Object.entries(autoRlsChecks).map(([name, valid]) => `${name}=${valid}`).join(', ')}.`);
     report(`Automatic RLS observed safe metadata: function=${automatic ? `${safeName(automatic.schema)}.${safeName(automatic.name)} owner=${safeName(automatic.owner)} language=${safeName(automatic.language)} result=${safeName(automatic.returnType)} security_definer=${automatic.securityDefiner} strict=${automatic.strict} volatility=${safeName(automatic.volatility)} source_length=${automatic.sourceLength} source_md5=${safeDigest(automatic.sourceMd5)}` : 'absent'}; event_trigger=${eventTrigger ? `${safeName(eventTrigger.name)} owner=${safeName(eventTrigger.owner)} enabled=${safeName(eventTrigger.enabled)} event=${safeName(eventTrigger.event)} tags_match=${autoRlsChecks.trigger_event_tag_set_matches} handler_match=${autoRlsChecks.trigger_handler_matches}` : 'absent'}; event_trigger_count=${state.eventTriggers.length}.`);
+    report(`Event-trigger allowlist checks (sanitized booleans): ${JSON.stringify(autoRlsChecks)}.`);
     report(`API roles: ${state.dataApiRoles.map(safeName).join(', ') || 'none'}.`);
     report(`API role existence: anon=${state.dataApiRoles.includes('anon')}; authenticated=${state.dataApiRoles.includes('authenticated')}.`);
     report(`API role audit completeness: expected_exactly_once=${state.dataApiRoleAudit?.length === 2
@@ -686,12 +687,20 @@ export async function openPostgresRuntime(settings: StagingDatabaseSettings, rea
     `);
     const eventTriggerResult = await catalogConnection.query<StagingCatalogState['eventTriggers'][number]>(`
       SELECT e.evtname AS name, pg_get_userbyid(e.evtowner) AS owner, e.evtenabled AS enabled,
-             e.evtevent AS event, e.evttags AS tags, hn.nspname AS "handlerSchema",
-             hp.proname AS "handlerName", hp.pronargs::integer AS "handlerArgumentCount",
+             e.evtevent AS event, e.evttags AS tags, e.evtfoid::text AS "triggerHandlerObjectId",
+             hn.nspname AS "handlerSchema", hp.proname AS "handlerName",
+             hp.pronargs::integer AS "handlerArgumentCount",
+             pg_get_function_identity_arguments(hp.oid) AS "handlerIdentityArguments",
+             pg_get_userbyid(hp.proowner) AS "handlerOwner", hl.lanname AS "handlerLanguage",
+             pg_get_function_result(hp.oid) AS "handlerReturnType", hp.prosecdef AS "handlerSecurityDefiner",
+             hp.proisstrict AS "handlerStrict", hp.provolatile AS "handlerVolatility",
+             hp.proconfig AS "handlerConfiguration", hp.proretset AS "handlerReturnsSet",
+             length(hp.prosrc)::integer AS "handlerSourceLength", md5(hp.prosrc) AS "handlerSourceMd5",
              hp.oid::text AS "handlerObjectId"
       FROM pg_event_trigger e
       JOIN pg_proc hp ON hp.oid = e.evtfoid
       JOIN pg_namespace hn ON hn.oid = hp.pronamespace
+      JOIN pg_language hl ON hl.oid = hp.prolang
       ORDER BY e.evtname
     `);
     const drizzleSchema = await catalogConnection.query<{ exists: boolean }>(`SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = 'drizzle') AS exists`);

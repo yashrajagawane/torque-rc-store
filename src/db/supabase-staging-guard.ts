@@ -35,8 +35,12 @@ export type StagingCatalogState = {
     configuration: string[] | null; sourceLength: number; sourceMd5: string; objectId: string;
   }>;
   eventTriggers: Array<{
-    name: string; owner: string; enabled: string; event: string; tags: string[] | null;
-    handlerSchema: string; handlerName: string; handlerArgumentCount: number; handlerObjectId: string;
+    name: string; owner: string; enabled: string; event: string; tags: readonly string[] | null;
+    triggerHandlerObjectId: string; handlerSchema: string; handlerName: string; handlerArgumentCount: number;
+    handlerIdentityArguments: string; handlerOwner: string; handlerLanguage: string; handlerReturnType: string;
+    handlerSecurityDefiner: boolean; handlerStrict: boolean; handlerVolatility: string;
+    handlerConfiguration: readonly string[] | null; handlerReturnsSet: boolean; handlerSourceLength: number; handlerSourceMd5: string;
+    handlerObjectId: string;
   }>;
   drizzleSchemaExists: boolean;
   drizzleRelations: string[];
@@ -79,14 +83,36 @@ const expectedAutomaticRlsEventTrigger = {
   handlerSchema: 'public', handlerName: 'rls_auto_enable', handlerArgumentCount: 0,
 } as const;
 
+type ExpectedEventTrigger = Omit<StagingCatalogState['eventTriggers'][number], 'triggerHandlerObjectId' | 'handlerObjectId'>;
+const expectedPlatformHandler = {
+  handlerSchema: 'extensions', handlerOwner: 'supabase_admin', handlerLanguage: 'plpgsql',
+  handlerArgumentCount: 0, handlerIdentityArguments: '', handlerReturnType: 'event_trigger',
+  handlerSecurityDefiner: false, handlerStrict: false, handlerVolatility: 'v',
+  handlerConfiguration: ['search_path=""'], handlerReturnsSet: false,
+} as const;
+const expectedEventTriggers: readonly ExpectedEventTrigger[] = [
+  {
+    name: 'ensure_rls', owner: 'postgres', enabled: 'O', event: 'ddl_command_end',
+    tags: ['CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO'],
+    handlerSchema: 'public', handlerName: 'rls_auto_enable', handlerArgumentCount: 0,
+    handlerIdentityArguments: '', handlerOwner: 'postgres', handlerLanguage: 'plpgsql', handlerReturnType: 'event_trigger',
+    handlerSecurityDefiner: true, handlerStrict: false, handlerVolatility: 'v',
+    handlerConfiguration: ['search_path=pg_catalog'], handlerReturnsSet: false,
+    handlerSourceLength: 1055, handlerSourceMd5: 'c44fb229ea8a6b0afd04a0a33261c16c',
+  },
+  { name: 'issue_graphql_placeholder', owner: 'supabase_admin', enabled: 'O', event: 'sql_drop', tags: ['DROP EXTENSION'], handlerName: 'set_graphql_placeholder', ...expectedPlatformHandler, handlerSourceLength: 1573, handlerSourceMd5: 'a2bc2d00b2cc2f5e8d2d6b8d73e2c360' },
+  { name: 'issue_pg_cron_access', owner: 'supabase_admin', enabled: 'O', event: 'ddl_command_end', tags: ['CREATE EXTENSION'], handlerName: 'grant_pg_cron_access', ...expectedPlatformHandler, handlerSourceLength: 1194, handlerSourceMd5: '3a3917aad6ddd66182bf45b7490c3029' },
+  { name: 'issue_pg_graphql_access', owner: 'supabase_admin', enabled: 'O', event: 'ddl_command_end', tags: ['CREATE EXTENSION'], handlerName: 'grant_pg_graphql_access', ...expectedPlatformHandler, handlerSourceLength: 1357, handlerSourceMd5: 'dd3f3e2bb94cff45ef24b9cecb6af1c8' },
+  { name: 'issue_pg_net_access', owner: 'supabase_admin', enabled: 'O', event: 'ddl_command_end', tags: ['CREATE EXTENSION'], handlerName: 'grant_pg_net_access', ...expectedPlatformHandler, handlerSourceLength: 1999, handlerSourceMd5: '2ee4e6920eeba3068bcfa838105352e2' },
+  { name: 'pgrst_ddl_watch', owner: 'supabase_admin', enabled: 'O', event: 'ddl_command_end', tags: null, handlerName: 'pgrst_ddl_watch', ...expectedPlatformHandler, handlerSourceLength: 729, handlerSourceMd5: '7f27b8118fea5c88b0164331292859e3' },
+  { name: 'pgrst_drop_watch', owner: 'supabase_admin', enabled: 'O', event: 'sql_drop', tags: null, handlerName: 'pgrst_drop_watch', ...expectedPlatformHandler, handlerSourceLength: 412, handlerSourceMd5: 'bc09cc3003d66f91844af4cb05e203b7' },
+];
+
 function exactAutomaticRlsConfiguration(state: StagingCatalogState): boolean {
-  if (state.supabaseAutomaticRlsFunctions.length !== 1 || state.eventTriggers.length !== 1) return false;
+  if (state.supabaseAutomaticRlsFunctions.length !== 1 || state.eventTriggers.length !== expectedEventTriggers.length) return false;
   const fn = state.supabaseAutomaticRlsFunctions[0]!;
-  const trigger = state.eventTriggers.find((item) => item.name === expectedAutomaticRlsEventTrigger.name);
   const config = fn.configuration ? [...fn.configuration].sort() : null;
-  const tags = normalizeEventTags(trigger?.tags);
-  if (!trigger || !tags) return false;
-  return fn.schema === expectedAutomaticRlsFunction.schema
+  const functionMatches = fn.schema === expectedAutomaticRlsFunction.schema
     && fn.name === expectedAutomaticRlsFunction.name
     && fn.argumentCount === expectedAutomaticRlsFunction.argumentCount
     && fn.identityArguments === expectedAutomaticRlsFunction.identityArguments
@@ -98,21 +124,57 @@ function exactAutomaticRlsConfiguration(state: StagingCatalogState): boolean {
     && fn.volatility === expectedAutomaticRlsFunction.volatility
     && JSON.stringify(config) === JSON.stringify([...expectedAutomaticRlsFunction.configuration].sort())
     && fn.sourceLength === expectedAutomaticRlsFunction.sourceLength
-    && fn.sourceMd5 === expectedAutomaticRlsFunction.sourceMd5
-    && trigger.name === expectedAutomaticRlsEventTrigger.name
-    && trigger.owner === expectedAutomaticRlsEventTrigger.owner
-    && trigger.enabled === expectedAutomaticRlsEventTrigger.enabled
-    && trigger.event === expectedAutomaticRlsEventTrigger.event
-    && JSON.stringify(tags) === JSON.stringify([...expectedAutomaticRlsEventTrigger.tags].sort())
-    && trigger.handlerSchema === expectedAutomaticRlsEventTrigger.handlerSchema
-    && trigger.handlerName === expectedAutomaticRlsEventTrigger.handlerName
-    && trigger.handlerArgumentCount === expectedAutomaticRlsEventTrigger.handlerArgumentCount
-    && trigger.handlerObjectId === fn.objectId;
+    && fn.sourceMd5 === expectedAutomaticRlsFunction.sourceMd5;
+  return functionMatches && expectedEventTriggers.every((expected) => {
+    const matches = state.eventTriggers.filter((actual) => actual.name === expected.name);
+    return matches.length === 1 && exactEventTrigger(matches[0]!, expected)
+      && (expected.name !== 'ensure_rls' || (typeof fn.objectId === 'string' && fn.objectId.length > 0
+        && matches[0]!.handlerObjectId === fn.objectId));
+  });
+}
+
+function exactEventTrigger(actual: StagingCatalogState['eventTriggers'][number], expected: ExpectedEventTrigger): boolean {
+  const actualConfiguration = normalizePgTextArray(actual.handlerConfiguration);
+  const expectedConfiguration = normalizePgTextArray(expected.handlerConfiguration);
+  const actualTags = normalizeEventTags(actual.tags);
+  const expectedTags = normalizeEventTags(expected.tags);
+  return actual.name === expected.name && actual.owner === expected.owner && actual.enabled === expected.enabled
+    && actual.event === expected.event && actualTags !== undefined && expectedTags !== undefined
+    && (actualTags === null ? expectedTags === null : expectedTags !== null && sameStrings(actualTags, expectedTags))
+    && actual.handlerSchema === expected.handlerSchema && actual.handlerName === expected.handlerName
+    && actual.handlerArgumentCount === expected.handlerArgumentCount
+    && actual.handlerIdentityArguments === expected.handlerIdentityArguments
+    && actual.handlerOwner === expected.handlerOwner && actual.handlerLanguage === expected.handlerLanguage
+    && actual.handlerReturnType === expected.handlerReturnType
+    && actual.handlerSecurityDefiner === expected.handlerSecurityDefiner && actual.handlerStrict === expected.handlerStrict
+    && actual.handlerVolatility === expected.handlerVolatility
+    && actualConfiguration !== undefined && expectedConfiguration !== undefined
+    && (actualConfiguration === null ? expectedConfiguration === null
+      : expectedConfiguration !== null && sameStrings(actualConfiguration, expectedConfiguration))
+    && actual.handlerReturnsSet === expected.handlerReturnsSet
+    && actual.handlerSourceLength === expected.handlerSourceLength && actual.handlerSourceMd5 === expected.handlerSourceMd5
+    && typeof actual.triggerHandlerObjectId === 'string' && actual.triggerHandlerObjectId.length > 0
+    && typeof actual.handlerObjectId === 'string' && actual.handlerObjectId.length > 0
+    && actual.triggerHandlerObjectId === actual.handlerObjectId;
+}
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  const sortedLeft = [...left].sort();
+  const sortedRight = [...right].sort();
+  return sortedLeft.length === sortedRight.length && sortedLeft.every((value, index) => value === sortedRight[index]);
+}
+
+/** pg's text[] parser returns a JS string array; NULL remains distinct from {}. */
+function normalizePgTextArray(value: unknown): string[] | null | undefined {
+  if (value === null) return null;
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) return undefined;
+  return [...value];
 }
 
 /** pg's text[] parser returns a JS string array. Reject alternate or malformed representations. */
-function normalizeEventTags(tags: unknown): string[] | null {
-  if (!Array.isArray(tags) || tags.some((tag) => typeof tag !== 'string')) return null;
+function normalizeEventTags(tags: unknown): string[] | null | undefined {
+  if (tags === null) return null;
+  if (!Array.isArray(tags) || tags.some((tag) => typeof tag !== 'string')) return undefined;
   return [...tags].sort();
 }
 
@@ -129,14 +191,8 @@ export function supabaseAutomaticRlsDiagnostics(state: StagingCatalogState): Rec
   const trigger = candidates.length === 1 ? candidates[0] : namedTriggers.length === 1 ? namedTriggers[0] : undefined;
   const expectedFn = expectedAutomaticRlsFunction;
   const expectedTrigger = expectedAutomaticRlsEventTrigger;
-  const sameSet = (actual: unknown, expected: readonly string[]) => {
-    const normalized = normalizeEventTags(actual);
-    const expectedSorted = [...expected].sort();
-    return normalized !== null && normalized.length === expectedSorted.length
-      && normalized.every((tag, index) => tag === expectedSorted[index]);
-  };
   const configuration = fn?.configuration ? [...fn.configuration].sort() : null;
-  return {
+  const result: Record<string, boolean> = {
     function_present_unique: Boolean(fn),
     function_schema_matches: fn?.schema === expectedFn.schema,
     function_name_matches: fn?.name === expectedFn.name,
@@ -151,18 +207,30 @@ export function supabaseAutomaticRlsDiagnostics(state: StagingCatalogState): Rec
     function_source_length_matches: fn?.sourceLength === expectedFn.sourceLength,
     function_source_fingerprint_matches: fn?.sourceMd5 === expectedFn.sourceMd5,
     trigger_present_unique: namedTriggers.length === 1,
-    only_expected_event_trigger_present: state.eventTriggers.length === 1,
+    event_trigger_count_matches: state.eventTriggers.length === expectedEventTriggers.length,
+    only_expected_event_trigger_present: state.eventTriggers.length === expectedEventTriggers.length
+      && expectedEventTriggers.every((expected) => state.eventTriggers.filter((actual) => actual.name === expected.name).length === 1)
+      && state.eventTriggers.every((actual) => expectedEventTriggers.some((expected) => expected.name === actual.name)),
     trigger_name_matches: trigger?.name === expectedTrigger.name,
     trigger_owner_matches: trigger?.owner === expectedTrigger.owner,
     trigger_enabled_matches: trigger?.enabled === expectedTrigger.enabled,
     trigger_event_matches: trigger?.event === expectedTrigger.event,
-    trigger_event_tag_set_matches: Boolean(trigger && sameSet(trigger.tags, expectedTrigger.tags)),
+    trigger_event_tag_set_matches: Boolean(trigger && normalizeEventTags(trigger.tags) !== undefined
+      && normalizeEventTags(trigger.tags) !== null && sameStrings(normalizeEventTags(trigger.tags)!, expectedTrigger.tags)),
     trigger_handler_matches: Boolean(trigger && trigger.handlerSchema === expectedTrigger.handlerSchema
       && trigger.handlerName === expectedTrigger.handlerName && trigger.handlerArgumentCount === expectedTrigger.handlerArgumentCount),
     function_trigger_relationship_matches: Boolean(fn && trigger && trigger.handlerSchema === fn.schema
       && trigger.handlerName === fn.name && trigger.handlerArgumentCount === fn.argumentCount
       && trigger.handlerObjectId === fn.objectId),
   };
+  for (const expected of expectedEventTriggers) {
+    const matches = state.eventTriggers.filter((actual) => actual.name === expected.name);
+    result[`trigger_${expected.name}_present_once`] = matches.length === 1;
+    result[`trigger_${expected.name}_metadata_matches`] = matches.length === 1
+      && exactEventTrigger(matches[0]!, expected)
+      && (expected.name !== 'ensure_rls' || matches[0]!.handlerObjectId === fn?.objectId);
+  }
+  return result;
 }
 
 /** Requires the exact Supabase-created automatic-RLS function and its enabled event trigger. */
@@ -426,9 +494,23 @@ export function assertStagingRequiredSchemas(schemas: StagingCatalogState['schem
 }
 
 export function assertStagingDataApiPrivileges(state: Pick<StagingCatalogState, 'dataApiRoleAudit'>): void {
-  const auditedRoles = state.dataApiRoleAudit?.map((role) => role.role).sort();
-  if (!auditedRoles || JSON.stringify(auditedRoles) !== JSON.stringify(['anon', 'authenticated'])
-    || (state.dataApiRoleAudit ?? []).some((role) => role.superuser || role.bypassRls || role.inheritsRuntimeOwner || role.memberOfRuntimeOwner
+  const rows = state.dataApiRoleAudit;
+  const auditedRoles = rows?.map((role) => role?.role).sort();
+  const booleanFields = [
+    'superuser', 'bypassRls', 'inheritsRuntimeOwner', 'memberOfRuntimeOwner',
+    'publicUsage', 'publicCreate', 'authUsage', 'authCreate', 'storageUsage', 'storageCreate', 'drizzleUsage', 'drizzleCreate',
+  ] as const;
+  const arrayFields = [
+    'applicationTablePrivileges', 'applicationColumnPrivileges', 'applicationSequencePrivileges',
+    'directApplicationTableAcl', 'directApplicationColumnAcl', 'directApplicationSequenceAcl',
+    'globalDefaultTablePrivileges', 'globalDefaultSequencePrivileges',
+    'schemaDefaultTablePrivileges', 'schemaDefaultSequencePrivileges',
+  ] as const;
+  const malformed = !rows || rows.some((role) => !role || !['anon', 'authenticated'].includes(role.role)
+    || booleanFields.some((field) => typeof role[field] !== 'boolean')
+    || arrayFields.some((field) => !Array.isArray(role[field]) || role[field].some((value) => typeof value !== 'string')));
+  if (malformed || !auditedRoles || JSON.stringify(auditedRoles) !== JSON.stringify(['anon', 'authenticated'])
+    || rows.some((role) => role.superuser || role.bypassRls || role.inheritsRuntimeOwner || role.memberOfRuntimeOwner
       || role.publicCreate || role.drizzleCreate || role.applicationTablePrivileges.length > 0
       || role.applicationColumnPrivileges.length > 0 || role.authCreate || role.storageCreate || role.applicationSequencePrivileges.length > 0
       || role.directApplicationTableAcl.length > 0 || role.directApplicationColumnAcl.length > 0 || role.directApplicationSequenceAcl.length > 0

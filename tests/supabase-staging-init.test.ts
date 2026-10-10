@@ -37,8 +37,24 @@ const approvedAutoRlsFunction = {
 const approvedAutoRlsTrigger = {
   name: 'ensure_rls', owner: 'postgres', enabled: 'O', event: 'ddl_command_end',
   tags: ['CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO'],
-  handlerSchema: 'public', handlerName: 'rls_auto_enable', handlerArgumentCount: 0, handlerObjectId: '18201',
+  triggerHandlerObjectId: '18201', handlerSchema: 'public', handlerName: 'rls_auto_enable', handlerArgumentCount: 0,
+  handlerIdentityArguments: '', handlerOwner: 'postgres', handlerLanguage: 'plpgsql', handlerReturnType: 'event_trigger',
+  handlerSecurityDefiner: true, handlerStrict: false, handlerVolatility: 'v', handlerConfiguration: ['search_path=pg_catalog'],
+  handlerReturnsSet: false, handlerSourceLength: 1055, handlerSourceMd5: 'c44fb229ea8a6b0afd04a0a33261c16c', handlerObjectId: '18201',
 };
+const platformHandler = {
+  handlerArgumentCount: 0, handlerIdentityArguments: '', handlerOwner: 'supabase_admin', handlerLanguage: 'plpgsql',
+  handlerReturnType: 'event_trigger', handlerSecurityDefiner: false, handlerStrict: false, handlerVolatility: 'v',
+  handlerConfiguration: ['search_path=""'], handlerReturnsSet: false,
+};
+const approvedPlatformTriggers = [
+  { name: 'issue_graphql_placeholder', owner: 'supabase_admin', enabled: 'O', event: 'sql_drop', tags: ['DROP EXTENSION'], handlerSchema: 'extensions', handlerName: 'set_graphql_placeholder', ...platformHandler, handlerSourceLength: 1573, handlerSourceMd5: 'a2bc2d00b2cc2f5e8d2d6b8d73e2c360', handlerObjectId: '90001', triggerHandlerObjectId: '90001' },
+  { name: 'issue_pg_cron_access', owner: 'supabase_admin', enabled: 'O', event: 'ddl_command_end', tags: ['CREATE EXTENSION'], handlerSchema: 'extensions', handlerName: 'grant_pg_cron_access', ...platformHandler, handlerSourceLength: 1194, handlerSourceMd5: '3a3917aad6ddd66182bf45b7490c3029', handlerObjectId: '90002', triggerHandlerObjectId: '90002' },
+  { name: 'issue_pg_graphql_access', owner: 'supabase_admin', enabled: 'O', event: 'ddl_command_end', tags: ['CREATE EXTENSION'], handlerSchema: 'extensions', handlerName: 'grant_pg_graphql_access', ...platformHandler, handlerSourceLength: 1357, handlerSourceMd5: 'dd3f3e2bb94cff45ef24b9cecb6af1c8', handlerObjectId: '90003', triggerHandlerObjectId: '90003' },
+  { name: 'issue_pg_net_access', owner: 'supabase_admin', enabled: 'O', event: 'ddl_command_end', tags: ['CREATE EXTENSION'], handlerSchema: 'extensions', handlerName: 'grant_pg_net_access', ...platformHandler, handlerSourceLength: 1999, handlerSourceMd5: '2ee4e6920eeba3068bcfa838105352e2', handlerObjectId: '90004', triggerHandlerObjectId: '90004' },
+  { name: 'pgrst_ddl_watch', owner: 'supabase_admin', enabled: 'O', event: 'ddl_command_end', tags: null, handlerSchema: 'extensions', handlerName: 'pgrst_ddl_watch', ...platformHandler, handlerSourceLength: 729, handlerSourceMd5: '7f27b8118fea5c88b0164331292859e3', handlerObjectId: '90005', triggerHandlerObjectId: '90005' },
+  { name: 'pgrst_drop_watch', owner: 'supabase_admin', enabled: 'O', event: 'sql_drop', tags: null, handlerSchema: 'extensions', handlerName: 'pgrst_drop_watch', ...platformHandler, handlerSourceLength: 412, handlerSourceMd5: 'bc09cc3003d66f91844af4cb05e203b7', handlerObjectId: '90006', triggerHandlerObjectId: '90006' },
+];
 const baseEnv: Record<string, string | undefined> = {
   SUPABASE_STAGING_ENABLED: 'true',
   SUPABASE_STAGING_PROJECT_REF: stagingRef,
@@ -78,7 +94,7 @@ function state(deps: StagingRunnerDependencies, contact = false, securityApplied
     ],
     drizzleObjects: [],
     supabaseAutomaticRlsFunctions: [approvedAutoRlsFunction],
-    eventTriggers: [approvedAutoRlsTrigger],
+    eventTriggers: [approvedAutoRlsTrigger, ...approvedPlatformTriggers],
     drizzleSchemaExists: true,
     drizzleRelations: ['__drizzle_migrations', '__drizzle_migrations_id_seq'],
     migrationHistory: [{ hash: deps.baseline.hash, createdAt: deps.baseline.when }],
@@ -226,7 +242,7 @@ describe('Supabase staging initialization guard', () => {
     const empty: StagingCatalogState = {
     identity: { database: 'postgres', loginUser: 'postgres', user: 'postgres', currentSchema: 'public', searchPath: 'public', serverPort: 5432, transactionReadOnly: true },
       schemas: { public: true, auth: true, storage: true, drizzle: false, supabaseMigrations: false },
-      supabaseAutomaticRlsFunctions: [approvedAutoRlsFunction], eventTriggers: [approvedAutoRlsTrigger],
+      supabaseAutomaticRlsFunctions: [approvedAutoRlsFunction], eventTriggers: [approvedAutoRlsTrigger, ...approvedPlatformTriggers],
       publicObjects: [{ name: 'rls_auto_enable', kind: 'routine', extensionOwned: false }], drizzleObjects: [], drizzleSchemaExists: false, drizzleRelations: [], migrationHistory: [],
       supabaseMigrationSchemaExists: false, supabaseMigrationRecords: 0, dataApiRoles: ['anon', 'authenticated'],
       dataApiRoleAudit: ['anon', 'authenticated'].map((role) => ({ role, superuser: false, bypassRls: false, inheritsRuntimeOwner: false, memberOfRuntimeOwner: false, publicUsage: true, publicCreate: false, authUsage: false, authCreate: false, storageUsage: false, storageCreate: false, drizzleUsage: false, drizzleCreate: false, applicationTablePrivileges: [], applicationColumnPrivileges: [], applicationSequencePrivileges: [], directApplicationTableAcl: [], directApplicationColumnAcl: [], directApplicationSequenceAcl: [], globalDefaultTablePrivileges: [], globalDefaultSequencePrivileges: [], schemaDefaultTablePrivileges: [], schemaDefaultSequencePrivileges: [] })),
@@ -247,7 +263,7 @@ describe('Supabase staging initialization guard', () => {
     const empty: StagingCatalogState = {
       identity: { database: 'postgres', loginUser: 'postgres', user: 'postgres', currentSchema: 'public', searchPath: 'public', serverPort: 5432 },
       schemas: { public: true, auth: true, storage: true, drizzle: false, supabaseMigrations: false },
-      supabaseAutomaticRlsFunctions: [approvedAutoRlsFunction], eventTriggers: [approvedAutoRlsTrigger],
+      supabaseAutomaticRlsFunctions: [approvedAutoRlsFunction], eventTriggers: [approvedAutoRlsTrigger, ...approvedPlatformTriggers],
       publicObjects: [{ name: 'extension_table', kind: 'relation', extensionOwned: true }],
       drizzleObjects: [],
       drizzleSchemaExists: false, drizzleRelations: [], migrationHistory: [],
@@ -265,7 +281,7 @@ describe('Supabase staging initialization guard', () => {
       schemas: { public: true, auth: true, storage: true, drizzle: false, supabaseMigrations: false },
       publicObjects: [{ name: 'rls_auto_enable', kind: 'routine', extensionOwned: false }],
       drizzleObjects: [],
-      supabaseAutomaticRlsFunctions: [approvedAutoRlsFunction], eventTriggers: [approvedAutoRlsTrigger],
+      supabaseAutomaticRlsFunctions: [approvedAutoRlsFunction], eventTriggers: [approvedAutoRlsTrigger, ...approvedPlatformTriggers],
       drizzleSchemaExists: false, drizzleRelations: [], migrationHistory: [],
       supabaseMigrationSchemaExists: false, supabaseMigrationRecords: 0, dataApiRoles: ['anon', 'authenticated'],
       dataApiRoleAudit: ['anon', 'authenticated'].map((role) => ({ role, superuser: false, bypassRls: false, inheritsRuntimeOwner: false, memberOfRuntimeOwner: false, publicUsage: true, publicCreate: false, authUsage: false, authCreate: false, storageUsage: false, storageCreate: false, drizzleUsage: false, drizzleCreate: false, applicationTablePrivileges: [], applicationColumnPrivileges: [], applicationSequencePrivileges: [], directApplicationTableAcl: [], directApplicationColumnAcl: [], directApplicationSequenceAcl: [], globalDefaultTablePrivileges: [], globalDefaultSequencePrivileges: [], schemaDefaultTablePrivileges: [], schemaDefaultSequencePrivileges: [] })),
@@ -277,12 +293,36 @@ describe('Supabase staging initialization guard', () => {
     assert.ok(Object.values(supabaseAutomaticRlsDiagnostics(accepted)).every(Boolean));
 
     // pg returns catalog text[] values as JavaScript arrays; order does not matter.
-    const shuffledTags = { ...accepted, eventTriggers: [{ ...approvedAutoRlsTrigger, tags: ['SELECT INTO', 'CREATE TABLE', 'CREATE TABLE AS'] }] };
+    const shuffledTags = { ...accepted, eventTriggers: accepted.eventTriggers.map((trigger) => trigger.name === 'ensure_rls'
+      ? { ...trigger, tags: ['SELECT INTO', 'CREATE TABLE', 'CREATE TABLE AS'] } : trigger) };
     assert.doesNotThrow(() => assertSupabaseAutomaticRlsConfiguration(shuffledTags));
     assert.ok(Object.values(supabaseAutomaticRlsDiagnostics(shuffledTags)).every(Boolean));
+    assert.throws(() => assertSupabaseAutomaticRlsConfiguration({ ...accepted, eventTriggers: accepted.eventTriggers.map((trigger) => trigger.name === 'pgrst_ddl_watch' ? { ...trigger, tags: [] } : trigger) }));
+    assert.doesNotThrow(() => assertSupabaseAutomaticRlsConfiguration({ ...accepted, eventTriggers: accepted.eventTriggers.map((trigger) => trigger.name === 'pgrst_ddl_watch' ? { ...trigger, tags: null } : trigger) }));
+
+    // Each platform trigger is an exact per-project snapshot, including handler metadata and OID linkage.
+    for (const expected of approvedPlatformTriggers) {
+      const mutations = [
+        { owner: 'unexpected_owner' }, { enabled: 'D' }, { event: expected.event === 'sql_drop' ? 'ddl_command_end' : 'sql_drop' },
+        { tags: [] }, { handlerName: 'unexpected_handler' }, { handlerSchema: 'public' },
+        { handlerArgumentCount: 1 }, { handlerIdentityArguments: 'value text' }, { handlerReturnType: 'trigger' },
+        { handlerOwner: 'unexpected_owner' }, { handlerLanguage: 'sql' },
+        { handlerSecurityDefiner: true }, { handlerStrict: true }, { handlerVolatility: 's' },
+        { handlerConfiguration: ['search_path=public'] }, { handlerReturnsSet: true },
+        { handlerSourceLength: expected.handlerSourceLength + 1 },
+        { handlerSourceMd5: '0'.repeat(32) }, { triggerHandlerObjectId: 'different-oid' },
+      ];
+      for (const mutation of mutations) {
+        const mutated = { ...accepted, eventTriggers: accepted.eventTriggers.map((trigger) => trigger.name === expected.name ? { ...trigger, ...mutation } : trigger) };
+        assert.throws(() => assertSupabaseAutomaticRlsConfiguration(mutated), `${expected.name} should reject ${Object.keys(mutation)[0]}`);
+      }
+      assert.throws(() => assertSupabaseAutomaticRlsConfiguration({ ...accepted, eventTriggers: accepted.eventTriggers.filter((trigger) => trigger.name !== expected.name) }), `${expected.name} missing`);
+      assert.throws(() => assertSupabaseAutomaticRlsConfiguration({ ...accepted, eventTriggers: [...accepted.eventTriggers, expected] }), `${expected.name} duplicated`);
+    }
+    assert.throws(() => assertSupabaseAutomaticRlsConfiguration({ ...accepted, eventTriggers: [...accepted.eventTriggers, { ...approvedAutoRlsTrigger, name: 'unexpected_eighth_trigger' }] }));
 
     // Diagnose the intended trigger even when an extra event trigger makes the target unsafe.
-    const extraTriggerState = { ...accepted, eventTriggers: [approvedAutoRlsTrigger, { ...approvedAutoRlsTrigger, name: 'unrelated_trigger', handlerName: 'other_handler' }] };
+    const extraTriggerState = { ...accepted, eventTriggers: [...accepted.eventTriggers, { ...approvedAutoRlsTrigger, name: 'unrelated_trigger', handlerName: 'other_handler' }] };
     const extraTriggerChecks = supabaseAutomaticRlsDiagnostics(extraTriggerState);
     assert.equal(extraTriggerChecks.trigger_name_matches, true);
     assert.equal(extraTriggerChecks.trigger_handler_matches, true);
@@ -313,7 +353,7 @@ describe('Supabase staging initialization guard', () => {
       { ...accepted, eventTriggers: [{ ...approvedAutoRlsTrigger, handlerSchema: 'other_schema' }] },
       { ...accepted, eventTriggers: [{ ...approvedAutoRlsTrigger, handlerArgumentCount: 1 }] },
       { ...accepted, supabaseAutomaticRlsFunctions: [] },
-      { ...accepted, eventTriggers: [approvedAutoRlsTrigger, { ...approvedAutoRlsTrigger, name: 'second_trigger' }] },
+      { ...accepted, eventTriggers: [...accepted.eventTriggers, { ...approvedAutoRlsTrigger, name: 'second_trigger' }] },
       { ...accepted, publicObjects: [...accepted.publicObjects, { name: 'custom_function', kind: 'routine', extensionOwned: false }] },
       { ...accepted, publicObjects: [...accepted.publicObjects, { name: 'unexpected_table', kind: 'relation', extensionOwned: false }] },
     ];
@@ -386,6 +426,12 @@ describe('Supabase staging initialization guard', () => {
     assert.throws(() => assertStagingDataApiPrivileges({ dataApiRoleAudit: safeRoles.map((role) => ({ ...role, memberOfRuntimeOwner: true })) }));
     assert.throws(() => assertStagingDataApiPrivileges({ dataApiRoleAudit: [safeRoles[0]!, safeRoles[0]!] }));
     assert.throws(() => assertStagingDataApiPrivileges({ dataApiRoleAudit: [safeRoles[0]!] }));
+    assert.throws(() => assertStagingDataApiPrivileges({ dataApiRoleAudit: [safeRoles[0]!, { ...safeRoles[1]!, role: 'service_role' }] }));
+    assert.throws(() => assertStagingDataApiPrivileges({ dataApiRoleAudit: [safeRoles[0]!, { ...safeRoles[1]!, publicCreate: undefined as unknown as boolean }] }));
+    assert.throws(() => assertStagingDataApiPrivileges({ dataApiRoleAudit: [safeRoles[0]!, { ...safeRoles[1]!, applicationTablePrivileges: undefined as unknown as string[] }] }));
+    assert.doesNotThrow(() => assertStagingDataApiPrivileges({ dataApiRoleAudit: safeRoles.map((role) => ({
+      ...role, applicationTablePrivileges: [], applicationColumnPrivileges: [], applicationSequencePrivileges: [],
+    })) }));
     for (const changed of [
       { ...safeRoles[0]!, inheritsRuntimeOwner: true },
       { ...safeRoles[0]!, memberOfRuntimeOwner: true },
@@ -676,7 +722,7 @@ describe('Supabase staging initialization guard', () => {
     assert.equal(code, 0);
     assert.equal(baselineCalls, 1);
     assert.equal(migrationCalls, 0);
-    assert.deepEqual(current.eventTriggers, [approvedAutoRlsTrigger]);
+    assert.deepEqual(current.eventTriggers, [approvedAutoRlsTrigger, ...approvedPlatformTriggers]);
     assert.deepEqual(current.supabaseAutomaticRlsFunctions, [approvedAutoRlsFunction]);
   });
 
@@ -728,7 +774,7 @@ describe('Supabase staging initialization guard', () => {
     assert.equal(code, 0);
     assert.equal(migrations, 1);
     assert.equal(current.migrationHistory.filter((entry) => entry.createdAt === deps.forward[0]?.when).length, 1);
-    assert.deepEqual(current.eventTriggers, [approvedAutoRlsTrigger]);
+    assert.deepEqual(current.eventTriggers, [approvedAutoRlsTrigger, ...approvedPlatformTriggers]);
     assert.deepEqual(current.supabaseAutomaticRlsFunctions, [approvedAutoRlsFunction]);
   });
 
