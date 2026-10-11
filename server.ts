@@ -15,6 +15,7 @@ import { availableAvailabilitySql, availableStockSql } from './src/server/invent
 import { createAdminContactInquiryRouter, createPublicContactRouter } from './src/server/contact-routes.ts';
 import { createHealthRouter } from './src/server/health-routes.ts';
 import { createAdminDashboardRouter } from './src/server/admin-dashboard-routes.ts';
+import { createAdminCatalogRouter } from './src/server/admin-catalog-routes.ts';
 import { createReservationCleanupHandler } from './src/server/reservation-cron-route.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -57,6 +58,7 @@ app.get('/api/owner/test', requireAuth, requireOwner, (_req, res) => {
 
 app.use('/api/admin', createAdminProductRouter(db));
 app.use('/api/admin/dashboard', createAdminDashboardRouter(db));
+app.use('/api/admin/catalog', createAdminCatalogRouter(db));
 app.use('/api/admin/orders', createAdminOrderRouter(db));
 app.use('/api/admin/payment-review-cases', createAdminPaymentReviewRouter(db));
 app.use('/api/admin/contact-inquiries', createAdminContactInquiryRouter(db));

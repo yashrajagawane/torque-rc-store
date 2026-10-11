@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
-import { ImagePlus, PackagePlus, Pencil, Search, Upload, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, ImagePlus, PackagePlus, Pencil, Search, Upload, X } from 'lucide-react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 import { isProductImageWithinUploadLimit } from '../lib/product-upload';
@@ -172,6 +172,13 @@ export function AdminProductsPage() {
     finally { setPublicationBusy(null); }
   }
 
+  function exportCsv() {
+    const escape = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+    const rows = [['id', 'name', 'slug', 'price', 'stock', 'brand', 'category', 'published'], ...products.map((product) => [product.id, product.name, product.slug, product.price, product.stock ?? 0, product.brandName || '', product.categoryName || '', product.isPublished ? 'yes' : 'no'])];
+    const blob = new Blob([rows.map((row) => row.map(escape).join(',')).join('\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'fly-rc-products.csv'; anchor.click(); URL.revokeObjectURL(url);
+  }
+
   function beginCreate() {
     setEditing(null);
     setForm({ ...emptyForm, categoryId: categories[0]?.id || 0, brandId: brands[0]?.id || 0 });
@@ -266,6 +273,7 @@ export function AdminProductsPage() {
               <Link to="/admin" className="btn-secondary px-5 py-3 text-xs">OVERVIEW</Link>
               <Link to="/admin/orders" className="btn-secondary px-5 py-3 text-xs">ORDERS</Link>
               <Link to="/admin/inventory" className="btn-secondary px-5 py-3 text-xs">INVENTORY</Link>
+              <Link to="/admin/catalog" className="btn-secondary px-5 py-3 text-xs">CATALOG</Link>
               <Link to="/admin/inquiries" className="btn-secondary px-5 py-3 text-xs">INQUIRIES</Link>
             </div>
             <button onClick={beginCreate} className="btn-primary px-5 py-3 text-xs"><span className="skew-x-[10deg] flex gap-2 items-center"><PackagePlus size={16} /> ADD PRODUCT</span></button>
@@ -324,7 +332,7 @@ export function AdminProductsPage() {
             <div className="md:col-span-2">
               <div className="flex items-center justify-between gap-4 mb-3"><div><p className="text-xs uppercase tracking-wider text-muted-foreground">Product images</p><p className="text-[11px] text-muted-foreground mt-1">The first image is used as the card thumbnail.</p></div><label className="btn-secondary px-4 py-2 text-[10px] cursor-pointer flex items-center gap-2"><Upload size={14} />{uploading ? 'UPLOADING…' : 'UPLOAD IMAGES'}<input className="sr-only" type="file" accept="image/jpeg,image/png,image/webp,image/avif" multiple disabled={uploading} onChange={(e) => { void uploadImages(e.target.files); e.currentTarget.value = ''; }} /></label></div>
               <div className="grid grid-cols-3 sm:grid-cols-6 gap-3">
-                {form.images.map((image, index) => <div key={`${image}-${index}`} className="relative aspect-square bg-[#111] border border-white/10 p-2"><img src={image} alt={`Product image ${index + 1}`} className="w-full h-full object-contain" /><button type="button" onClick={() => setForm((v) => ({ ...v, images: v.images.filter((_, i) => i !== index) }))} className="absolute -top-2 -right-2 bg-red-600 text-white rounded-full p-1" aria-label={`Remove image ${index + 1}`}><X size={12} /></button></div>)}
+                {form.images.map((image, index) => <div key={`${image}-${index}`} className="relative aspect-square bg-[#111] border border-white/10 p-2"><img src={image} alt={`Product image ${index + 1}`} className="w-full h-full object-contain" /><div className="absolute left-1 right-1 bottom-1 flex justify-between"><button type="button" disabled={index === 0} onClick={() => setForm((v) => { const images = [...v.images]; [images[index - 1], images[index]] = [images[index], images[index - 1]]; return { ...v, images }; })} className="bg-black/80 p-1 disabled:opacity-30" aria-label="Move image earlier"><ArrowUp size={12} /></button><button type="button" disabled={index === form.images.length - 1} onClick={() => setForm((v) => { const images = [...v.images]; [images[index], images[index + 1]] = [images[index + 1], images[index]]; return { ...v, images }; })} className="bg-black/80 p-1 disabled:opacity-30" aria-label="Move image later"><ArrowDown size={12} /></button></div><button type="button" onClick={() => setForm((v) => ({ ...v, images: v.images.filter((_, i) => i !== index) }))} className="absolute -top-2 -right-2 bg-red-600 text-white rounded-full p-1" aria-label={`Remove image ${index + 1}`}><X size={12} /></button></div>)}
                 {!form.images.length && <div className="aspect-square border border-dashed border-white/20 flex items-center justify-center text-muted-foreground"><ImagePlus /></div>}
               </div>
             </div>
@@ -349,6 +357,7 @@ export function AdminProductsPage() {
               <select value={publicationFilter} onChange={(e) => setPublicationFilter(e.target.value)} className="bg-[#111] border border-white/10 px-3 py-2 text-xs"><option value="">All publication</option><option value="published">Published</option><option value="draft">Drafts</option></select>
               <select value={stockFilter} onChange={(e) => setStockFilter(e.target.value)} className="bg-[#111] border border-white/10 px-3 py-2 text-xs"><option value="">All stock</option><option value="low">Low stock</option><option value="out">Out of stock</option></select>
               <select value={sortOrder} onChange={(e) => setSortOrder(e.target.value)} className="bg-[#111] border border-white/10 px-3 py-2 text-xs"><option value="updated">Recently updated</option><option value="name">Name</option><option value="stock">Stock</option><option value="price">Price</option></select>
+              <button onClick={exportCsv} className="btn-secondary px-3 py-2 text-[10px]">EXPORT CSV</button>
             </div>
           </div>
           {selectedIds.length > 0 && <div className="flex flex-wrap items-center gap-2 border-b border-white/5 p-4"><span className="text-xs text-muted-foreground">{selectedIds.length} selected</span><button onClick={() => void bulkPublish(true)} disabled={publicationBusy !== null} className="btn-secondary px-3 py-2 text-[10px]">PUBLISH SELECTED</button><button onClick={() => void bulkPublish(false)} disabled={publicationBusy !== null} className="btn-secondary px-3 py-2 text-[10px]">UNPUBLISH SELECTED</button></div>}
@@ -359,6 +368,7 @@ export function AdminProductsPage() {
               <div className="min-w-0 flex-1"><h3 className="font-bold text-sm truncate">{product.name}</h3><p className="text-xs text-muted-foreground mt-1">/{product.slug} · {product.brandName || 'No brand'} · {product.categoryName || 'No category'} · ₹{product.price}</p></div>
               <span className={`self-start md:self-auto text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 border ${product.isPublished ? 'border-emerald-500/30 text-emerald-300 bg-emerald-500/5' : 'border-amber-500/30 text-amber-300 bg-amber-500/5'}`}>{product.isPublished ? 'Published' : 'Draft'}</span>
               <div className="flex gap-2">
+                <a href={`/products/${product.slug}`} target="_blank" rel="noreferrer" className="btn-secondary px-2 py-2 text-[10px]" title="Preview product">PREVIEW</a>
                 <button onClick={() => beginEdit(product)} className="btn-secondary p-2" title="Edit product"><Pencil size={15} /></button>
                 <button disabled={publicationBusy === product.id} onClick={() => void setPublished(product, !product.isPublished)} className={`text-[10px] font-bold uppercase border px-3 py-2 disabled:opacity-50 ${product.isPublished ? 'border-white/10 text-muted-foreground hover:text-white' : 'border-accent/40 text-accent hover:bg-accent/10'}`}>{publicationBusy === product.id ? 'WAIT…' : product.isPublished ? 'UNPUBLISH' : 'PUBLISH'}</button>
               </div>
