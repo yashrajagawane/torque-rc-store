@@ -19,6 +19,7 @@ export function AdminContactInquiriesPage() {
   const [inquiries, setInquiries] = useState<ContactInquiry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [busyId, setBusyId] = useState<number | null>(null);
 
   const loadInquiries = useCallback(async () => {
     setLoading(true);
@@ -39,6 +40,18 @@ export function AdminContactInquiriesPage() {
   }, [session?.access_token]);
 
   useEffect(() => { void loadInquiries(); }, [loadInquiries]);
+
+  async function updateStatus(id: number, status: string) {
+    if (!session?.access_token) return;
+    setBusyId(id); setError('');
+    try {
+      const response = await fetch(`/api/admin/contact-inquiries/${id}/status`, { method: 'PATCH', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ status }) });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || 'Inquiry status could not be updated.');
+      await loadInquiries();
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Inquiry status could not be updated.'); }
+    finally { setBusyId(null); }
+  }
 
   return <main className="pt-32 pb-24 min-h-screen">
     <div className="container px-4 md:px-6 max-w-5xl">
@@ -66,6 +79,7 @@ export function AdminContactInquiriesPage() {
             </div>
             <p className="mt-4 text-xs font-bold uppercase tracking-wider text-muted-foreground">{inquiry.inquiryType}{inquiry.model ? ` · ${inquiry.model}` : ''}</p>
             <p className="mt-3 whitespace-pre-wrap break-words text-sm leading-relaxed text-white/90">{inquiry.message}</p>
+            <div className="mt-4 flex flex-wrap gap-2"><button disabled={busyId === inquiry.id} onClick={() => void updateStatus(inquiry.id, 'REVIEWED')} className="btn-secondary px-3 py-2 text-[10px]">MARK REVIEWED</button><button disabled={busyId === inquiry.id} onClick={() => void updateStatus(inquiry.id, 'CLOSED')} className="btn-secondary px-3 py-2 text-[10px]">CLOSE</button><a href={`mailto:${inquiry.email}`} className="btn-secondary px-3 py-2 text-[10px]">EMAIL CUSTOMER</a></div>
           </article>)}</div>}
     </div>
   </main>;

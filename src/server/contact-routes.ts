@@ -1,6 +1,6 @@
 import express, { type RequestHandler } from 'express';
 import { z } from 'zod';
-import { desc } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 import type { db } from '../db/index.ts';
 import { contactInquiries } from '../db/schema.ts';
 import { requireAuth, requireOwner } from './auth.ts';
@@ -104,6 +104,16 @@ export function createAdminContactInquiryRouter(
       console.error('Contact inquiry inbox query failed.');
       res.status(503).json({ error: 'The inquiry inbox is temporarily unavailable.' });
     }
+  });
+  router.patch('/:id/status', async (req, res) => {
+    const id = Number(req.params.id);
+    const parsed = z.object({ status: z.enum(['NEW', 'REVIEWED', 'CLOSED']) }).strict().safeParse(req.body);
+    if (!Number.isSafeInteger(id) || id < 1 || !parsed.success) { res.status(400).json({ error: 'Inquiry status is invalid.' }); return; }
+    try {
+      const [updated] = await database.update(contactInquiries).set({ status: parsed.data.status }).where(eq(contactInquiries.id, id)).returning();
+      if (!updated) { res.status(404).json({ error: 'Inquiry not found.' }); return; }
+      res.json(updated);
+    } catch { res.status(503).json({ error: 'Inquiry status could not be updated.' }); }
   });
   return router;
 }

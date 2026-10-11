@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { createHash } from 'node:crypto';
 import { Router, type Request, type RequestHandler, type Response } from 'express';
-import { and, asc, desc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, ilike, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
 import type { db } from '../db/index.ts';
 import { cartItems, inventoryReservations, orderItems, orders, products } from '../db/schema.ts';
@@ -105,7 +105,7 @@ async function orderItemsFor(transaction: Transaction, orderId: number) {
   return transaction.select().from(orderItems).where(eq(orderItems.orderId, orderId)).orderBy(asc(orderItems.id));
 }
 
-async function readOrders(database: Database, filter?: ReturnType<typeof eq>) {
+async function readOrders(database: Database, filter?: SQL) {
   const query = database.select().from(orders).$dynamic();
   const rows = await (filter ? query.where(filter) : query).orderBy(desc(orders.createdAt));
   if (!rows.length) return [];
@@ -269,8 +269,17 @@ export function createOrderRouter(database: Database, authenticate: RequestHandl
 export function createAdminOrderRouter(database: Database, authenticate: RequestHandler = requireAuth, authorizeOwner: RequestHandler = requireOwner) {
   const router = Router();
   router.use(authenticate, authorizeOwner);
-  router.get('/', async (_req, res) => {
-    try { res.json({ orders: await readOrders(database) }); }
+  router.get('/', async (req, res) => {
+    try {
+      const status = typeof req.query.status === 'string' ? req.query.status.trim().toUpperCase() : '';
+      const payment = typeof req.query.payment === 'string' ? req.query.payment.trim().toUpperCase() : '';
+      const search = typeof req.query.search === 'string' ? req.query.search.trim().slice(0, 100) : '';
+      const filters: SQL[] = [];
+      if (status) filters.push(eq(orders.fulfillmentStatus, status));
+      if (payment) filters.push(eq(orders.paymentStatus, payment));
+      if (search) filters.push(ilike(orders.customerEmail, `%${search.replace(/[\\%_]/g, '\\$&')}%`));
+      res.json({ orders: await readOrders(database, filters.length ? and(...filters) : undefined) });
+    }
     catch { res.status(500).json({ error: 'Order management is temporarily unavailable.' }); }
   });
 

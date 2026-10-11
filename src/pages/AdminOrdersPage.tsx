@@ -50,6 +50,9 @@ export function AdminOrdersPage() {
   const [busyId, setBusyId] = useState<number | null>(null);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [statusFilter, setStatusFilter] = useState('');
+  const [paymentFilter, setPaymentFilter] = useState('');
+  const [search, setSearch] = useState('');
 
   const request = useCallback(async (path: string, init: RequestInit = {}) => {
     if (!session?.access_token) throw new Error('Your session expired. Sign in again.');
@@ -66,14 +69,15 @@ export function AdminOrdersPage() {
     setLoading(true);
     setError('');
     try {
+      const params = new URLSearchParams(); if (statusFilter) params.set('status', statusFilter); if (paymentFilter) params.set('payment', paymentFilter); if (search.trim()) params.set('search', search.trim());
       const [payload, reviewPayload] = await Promise.all([
-        request('/api/admin/orders'), request('/api/admin/payment-review-cases'),
+        request(`/api/admin/orders?${params}`), request('/api/admin/payment-review-cases'),
       ]);
       setOrders(Array.isArray(payload.orders) ? payload.orders as ManagedOrder[] : []);
       setReviewCases(Array.isArray(reviewPayload.cases) ? reviewPayload.cases as PaymentReviewCase[] : []);
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Order management is unavailable.'); }
     finally { setLoading(false); }
-  }, [request]);
+  }, [paymentFilter, request, search, statusFilter]);
 
   useEffect(() => { void loadOrders(); }, [loadOrders]);
 
@@ -96,6 +100,7 @@ export function AdminOrdersPage() {
         <div className="flex flex-wrap gap-2"><Link to="/admin/products" className="btn-secondary px-4 py-3 text-xs">PRODUCTS</Link><Link to="/admin" className="btn-secondary px-4 py-3 text-xs">OVERVIEW</Link><Link to="/admin/inquiries" className="btn-secondary px-4 py-3 text-xs">INQUIRIES</Link></div>
       </div>
       <nav aria-label="Admin sections" className="flex flex-wrap gap-5 mb-6 text-xs font-bold uppercase tracking-widest"><Link to="/admin/products" className="text-muted-foreground hover:text-white">Products</Link><span className="text-accent">Orders</span><Link to="/admin/inquiries" className="text-muted-foreground hover:text-white">Inquiries</Link></nav>
+      <div className="mb-6 flex flex-wrap gap-2"><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search customer email" className="bg-[#111] border border-white/10 px-3 py-2 text-xs" /><select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="bg-[#111] border border-white/10 px-3 py-2 text-xs"><option value="">All fulfillment</option><option value="UNFULFILLED">Unfulfilled</option><option value="PROCESSING">Processing</option><option value="SHIPPED">Shipped</option><option value="DELIVERED">Delivered</option><option value="CANCELLED">Cancelled</option></select><select value={paymentFilter} onChange={(e) => setPaymentFilter(e.target.value)} className="bg-[#111] border border-white/10 px-3 py-2 text-xs"><option value="">All payment</option><option value="PAID">Paid</option><option value="UNPAID">Unpaid</option></select></div>
       {error && <p role="alert" className="mb-5 border border-red-500/30 bg-red-500/5 p-4 text-sm text-red-300">{error}</p>}
       {notice && <p role="status" className="mb-5 border border-emerald-500/30 bg-emerald-500/5 p-4 text-sm text-emerald-300">{notice}</p>}
       {reviewCases.length > 0 && <section className="glass-card mb-6 border border-amber-500/30 p-5" aria-labelledby="payment-review-heading">
