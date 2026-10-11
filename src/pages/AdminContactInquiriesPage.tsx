@@ -45,12 +45,13 @@ export function AdminContactInquiriesPage() {
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-5 mb-8 border-b border-white/10 pb-6">
         <div><p className="text-accent font-mono text-xs font-bold uppercase tracking-[0.3em] mb-2">Owner Console</p><h1 className="text-3xl md:text-4xl italic">CUSTOMER INQUIRIES</h1></div>
         <div className="flex flex-wrap gap-2">
-          <Link to="/admin" className="btn-secondary px-4 py-3 text-xs">PRODUCTS</Link>
+          <Link to="/admin/products" className="btn-secondary px-4 py-3 text-xs">PRODUCTS</Link>
+          <Link to="/admin" className="btn-secondary px-4 py-3 text-xs">OVERVIEW</Link>
           <Link to="/admin/orders" className="btn-secondary px-4 py-3 text-xs">ORDERS</Link>
         </div>
       </div>
       <nav aria-label="Admin sections" className="flex flex-wrap gap-5 mb-6 text-xs font-bold uppercase tracking-widest">
-        <Link to="/admin" className="text-muted-foreground hover:text-white">Products</Link>
+        <Link to="/admin/products" className="text-muted-foreground hover:text-white">Products</Link>
         <Link to="/admin/orders" className="text-muted-foreground hover:text-white">Orders</Link>
         <span className="text-accent">Inquiries</span>
       </nav>

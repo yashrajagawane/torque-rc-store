@@ -1,8 +1,9 @@
 import 'dotenv/config';
 import { randomUUID } from 'node:crypto';
 import { Router, raw, type Request, type Response } from 'express';
-import { and, asc, desc, eq, gt, ilike, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, ilike, inArray, lte, or, sql } from 'drizzle-orm';
 import { createClient } from '@supabase/supabase-js';
+import { z } from 'zod';
 import type { db } from '../db/index.ts';
 import { brands, categories, inventoryReservations, products } from '../db/schema.ts';
 import { requireAuth, requireOwner } from './auth.ts';
@@ -110,6 +111,9 @@ export function createAdminProductRouter(database: Database) {
 
   router.get('/products', async (req, res) => {
     const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+    const publication = req.query.publication === 'published' || req.query.publication === 'draft' ? req.query.publication : '';
+    const stockState = req.query.stock === 'low' || req.query.stock === 'out' ? req.query.stock : '';
+    const sort = req.query.sort === 'name' || req.query.sort === 'stock' || req.query.sort === 'price' ? req.query.sort : 'updated';
     if (search.length > 100) {
       res.status(400).json({ error: 'Search text must be 100 characters or fewer.' });
       return;
@@ -120,11 +124,18 @@ export function createAdminProductRouter(database: Database) {
         .leftJoin(brands, eq(products.brandId, brands.id))
         .leftJoin(categories, eq(products.categoryId, categories.id))
         .$dynamic();
+      const filters = [];
       if (search) {
         const pattern = `%${search.replace(/[\\%_]/g, '\\$&')}%`;
-        query = query.where(or(ilike(products.name, pattern), ilike(products.slug, pattern)));
+        filters.push(or(ilike(products.name, pattern), ilike(products.slug, pattern)));
       }
-      res.json(await query.orderBy(desc(products.updatedAt)));
+      if (publication === 'published') filters.push(eq(products.isPublished, true));
+      if (publication === 'draft') filters.push(eq(products.isPublished, false));
+      if (stockState === 'out') filters.push(lte(products.stock, 0));
+      if (stockState === 'low') filters.push(and(gt(products.stock, 0), lte(products.stock, 5)));
+      if (filters.length) query = query.where(and(...filters));
+      const order = sort === 'name' ? asc(products.name) : sort === 'stock' ? asc(products.stock) : sort === 'price' ? asc(products.price) : desc(products.updatedAt);
+      res.json(await query.orderBy(order));
     } catch (error) {
       reportProductError(error, res);
     }
@@ -140,6 +151,21 @@ export function createAdminProductRouter(database: Database) {
       if (!await validateReferences(database, parsed.data, res)) return;
       const [created] = await database.insert(products).values(buildNewProductValues(parsed.data)).returning();
       res.status(201).json(created);
+    } catch (error) {
+      reportProductError(error, res);
+    }
+  });
+
+  router.patch('/products/bulk-publication', async (req, res) => {
+    const parsed = z.object({ ids: z.array(z.number().int().positive()).min(1).max(100), isPublished: z.boolean() }).strict().safeParse(req.body);
+    if (!parsed.success) {
+      sendValidationError(res, parsed.error);
+      return;
+    }
+    try {
+      const updated = await database.update(products).set({ isPublished: parsed.data.isPublished, updatedAt: new Date() })
+        .where(inArray(products.id, parsed.data.ids)).returning({ id: products.id });
+      res.json({ updated: updated.length });
     } catch (error) {
       reportProductError(error, res);
     }

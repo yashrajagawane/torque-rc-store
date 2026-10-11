@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { ImagePlus, PackagePlus, Pencil, Search, Upload, X } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 import { isProductImageWithinUploadLimit } from '../lib/product-upload';
 
@@ -81,6 +81,7 @@ function slugify(value: string) {
 
 export function AdminProductsPage() {
   const { session } = useAuth();
+  const [searchParams] = useSearchParams();
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<Option[]>([]);
   const [brands, setBrands] = useState<Option[]>([]);
@@ -94,6 +95,10 @@ export function AdminProductsPage() {
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [publicationBusy, setPublicationBusy] = useState<number | null>(null);
+  const [publicationFilter, setPublicationFilter] = useState(() => searchParams.get('publication') || '');
+  const [stockFilter, setStockFilter] = useState(() => searchParams.get('stock') || '');
+  const [sortOrder, setSortOrder] = useState(() => searchParams.get('sort') || 'updated');
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
 
   const request = useCallback(async (path: string, init: RequestInit = {}) => {
     const token = session?.access_token;
@@ -115,18 +120,22 @@ export function AdminProductsPage() {
     try {
       const params = new URLSearchParams();
       if (searchText.trim()) params.set('search', searchText.trim());
+      if (publicationFilter) params.set('publication', publicationFilter);
+      if (stockFilter) params.set('stock', stockFilter);
+      if (sortOrder) params.set('sort', sortOrder);
       const rows = await request(`/api/admin/products?${params}`, { method: 'GET' });
       setProducts(rows.map((row: { product: Product; brandName: string | null; categoryName: string | null }) => ({
         ...row.product,
         brandName: row.brandName,
         categoryName: row.categoryName,
       })));
+      setSelectedIds([]);
     } catch (cause) {
       setFormError(cause instanceof Error ? cause.message : 'Could not load products.');
     } finally {
       setLoading(false);
     }
-  }, [request]);
+  }, [publicationFilter, request, sortOrder, stockFilter]);
 
   useEffect(() => {
     let active = true;
@@ -148,7 +157,20 @@ export function AdminProductsPage() {
   useEffect(() => {
     const timer = window.setTimeout(() => { void loadProducts(search); }, 180);
     return () => window.clearTimeout(timer);
-  }, [loadProducts, search]);
+  }, [loadProducts, search, publicationFilter, stockFilter, sortOrder]);
+
+  async function bulkPublish(isPublished: boolean) {
+    if (!selectedIds.length) return;
+    setPublicationBusy(-1);
+    setFormError('');
+    setNotice('');
+    try {
+      const result = await request('/api/admin/products/bulk-publication', { method: 'PATCH', body: JSON.stringify({ ids: selectedIds, isPublished }) });
+      setNotice(`${result.updated} product${result.updated === 1 ? '' : 's'} updated.`);
+      await loadProducts(search);
+    } catch (cause) { setFormError(cause instanceof Error ? cause.message : 'Bulk update failed.'); }
+    finally { setPublicationBusy(null); }
+  }
 
   function beginCreate() {
     setEditing(null);
@@ -241,7 +263,9 @@ export function AdminProductsPage() {
           </div>
           <div className="flex gap-3">
             <div className="flex flex-wrap gap-2">
+              <Link to="/admin" className="btn-secondary px-5 py-3 text-xs">OVERVIEW</Link>
               <Link to="/admin/orders" className="btn-secondary px-5 py-3 text-xs">ORDERS</Link>
+              <Link to="/admin/inventory" className="btn-secondary px-5 py-3 text-xs">INVENTORY</Link>
               <Link to="/admin/inquiries" className="btn-secondary px-5 py-3 text-xs">INQUIRIES</Link>
             </div>
             <button onClick={beginCreate} className="btn-primary px-5 py-3 text-xs"><span className="skew-x-[10deg] flex gap-2 items-center"><PackagePlus size={16} /> ADD PRODUCT</span></button>
@@ -320,10 +344,17 @@ export function AdminProductsPage() {
         <div className="glass-card border border-white/5 bg-[#080808]">
           <div className="p-4 md:p-5 flex flex-col sm:flex-row gap-4 sm:items-center justify-between border-b border-white/5">
             <div><h2 className="text-base font-bold uppercase italic">Catalog inventory</h2><p className="text-xs text-muted-foreground mt-1">{products.length} products</p></div>
-            <label className="relative sm:w-80"><Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search products or slugs" className="w-full bg-[#111] border border-white/10 py-2.5 pl-9 pr-3 text-sm outline-none focus:border-accent" /></label>
+            <div className="flex flex-wrap gap-2 sm:justify-end">
+              <label className="relative sm:w-64"><Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search products or slugs" className="w-full bg-[#111] border border-white/10 py-2.5 pl-9 pr-3 text-sm outline-none focus:border-accent" /></label>
+              <select value={publicationFilter} onChange={(e) => setPublicationFilter(e.target.value)} className="bg-[#111] border border-white/10 px-3 py-2 text-xs"><option value="">All publication</option><option value="published">Published</option><option value="draft">Drafts</option></select>
+              <select value={stockFilter} onChange={(e) => setStockFilter(e.target.value)} className="bg-[#111] border border-white/10 px-3 py-2 text-xs"><option value="">All stock</option><option value="low">Low stock</option><option value="out">Out of stock</option></select>
+              <select value={sortOrder} onChange={(e) => setSortOrder(e.target.value)} className="bg-[#111] border border-white/10 px-3 py-2 text-xs"><option value="updated">Recently updated</option><option value="name">Name</option><option value="stock">Stock</option><option value="price">Price</option></select>
+            </div>
           </div>
+          {selectedIds.length > 0 && <div className="flex flex-wrap items-center gap-2 border-b border-white/5 p-4"><span className="text-xs text-muted-foreground">{selectedIds.length} selected</span><button onClick={() => void bulkPublish(true)} disabled={publicationBusy !== null} className="btn-secondary px-3 py-2 text-[10px]">PUBLISH SELECTED</button><button onClick={() => void bulkPublish(false)} disabled={publicationBusy !== null} className="btn-secondary px-3 py-2 text-[10px]">UNPUBLISH SELECTED</button></div>}
           {loading ? <p role="status" className="p-10 text-center text-sm text-muted-foreground">Loading products…</p> : products.length === 0 ? <p className="p-10 text-center text-sm text-muted-foreground">No products found.</p> : <div className="divide-y divide-white/5">
             {products.map((product) => <article key={product.id} className="p-4 md:px-5 flex flex-col md:flex-row md:items-center gap-4">
+              <input type="checkbox" checked={selectedIds.includes(product.id)} onChange={(e) => setSelectedIds((current) => e.target.checked ? [...current, product.id] : current.filter((id) => id !== product.id))} aria-label={`Select ${product.name}`} />
               <img src={product.thumbnail} alt="" className="w-20 h-16 object-contain bg-black border border-white/5 p-1" />
               <div className="min-w-0 flex-1"><h3 className="font-bold text-sm truncate">{product.name}</h3><p className="text-xs text-muted-foreground mt-1">/{product.slug} · {product.brandName || 'No brand'} · {product.categoryName || 'No category'} · ₹{product.price}</p></div>
               <span className={`self-start md:self-auto text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 border ${product.isPublished ? 'border-emerald-500/30 text-emerald-300 bg-emerald-500/5' : 'border-amber-500/30 text-amber-300 bg-amber-500/5'}`}>{product.isPublished ? 'Published' : 'Draft'}</span>

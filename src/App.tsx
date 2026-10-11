@@ -25,6 +25,8 @@ import { AdminProductsPage } from './pages/AdminProductsPage';
 import { CheckoutPage } from './pages/CheckoutPage';
 import { AdminOrdersPage } from './pages/AdminOrdersPage';
 import { AdminContactInquiriesPage } from './pages/AdminContactInquiriesPage';
+import { AdminDashboardPage } from './pages/AdminDashboardPage';
+import { AdminInventoryPage } from './pages/AdminInventoryPage';
 import { CartSync } from './cart/CartSync';
 
 const ScrollToTop = () => {
@@ -117,7 +119,9 @@ export default function App() {
             <Route path="/auth/callback" element={<AuthCallbackPage />} />
             <Route path="/account" element={<RequireAuth><AccountDashboardPage /></RequireAuth>} />
             <Route path="/checkout" element={<RequireAuth><CheckoutPage /></RequireAuth>} />
-            <Route path="/admin" element={<RequireOwner><AdminProductsPage /></RequireOwner>} />
+            <Route path="/admin" element={<RequireOwner><AdminDashboardPage /></RequireOwner>} />
+            <Route path="/admin/products" element={<RequireOwner><AdminProductsPage /></RequireOwner>} />
+            <Route path="/admin/inventory" element={<RequireOwner><AdminInventoryPage /></RequireOwner>} />
             <Route path="/admin/orders" element={<RequireOwner><AdminOrdersPage /></RequireOwner>} />
             <Route path="/admin/inquiries" element={<RequireOwner><AdminContactInquiriesPage /></RequireOwner>} />
             <Route path="*" element={<NotFound />} />
