@@ -1,4 +1,4 @@
-# Fly RC Hobbies
+# RC MEGA / Fly RC Hobbies
 
 React + TypeScript storefront with an Express API, PostgreSQL, and Drizzle ORM.
 The backend supports either local PostgreSQL or a remote PostgreSQL provider such
