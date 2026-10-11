@@ -68,6 +68,14 @@ export const products = pgTable('products', {
   availability: text('availability').default('IN_STOCK'), // IN_STOCK, LOW_STOCK, ON_ORDER, OUT_OF_STOCK
   featured: boolean('featured').default(false),
   newArrival: boolean('new_arrival').default(false),
+  isArchived: boolean('is_archived').notNull().default(false),
+  lowStockThreshold: integer('low_stock_threshold').notNull().default(5),
+  supplierName: text('supplier_name'),
+  supplierSku: text('supplier_sku'),
+  costPrice: numeric('cost_price', { precision: 10, scale: 2 }),
+  seoTitle: text('seo_title'),
+  seoDescription: text('seo_description'),
+  socialImage: text('social_image'),
   // Migration backfills existing rows as published, then defaults future rows to drafts.
   isPublished: boolean('is_published').notNull().default(false),
   createdAt: timestamp('created_at').defaultNow(),
@@ -166,6 +174,20 @@ export const wishlist = pgTable('wishlist', {
   createdAt: timestamp('created_at').defaultNow(),
 }).enableRLS();
 
+export const inventoryMovements = pgTable('inventory_movements', {
+  id: serial('id').primaryKey(),
+  productId: integer('product_id').notNull().references(() => products.id, { onDelete: 'restrict' }),
+  ownerAuthId: text('owner_auth_id').notNull(),
+  delta: integer('delta').notNull(),
+  previousStock: integer('previous_stock').notNull(),
+  newStock: integer('new_stock').notNull(),
+  reason: text('reason').notNull(),
+  orderId: integer('order_id').references(() => orders.id, { onDelete: 'set null' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index('inventory_movements_product_created_idx').on(table.productId, table.createdAt),
+]).enableRLS();
+
 export const reviews = pgTable('reviews', {
   id: serial('id').primaryKey(),
   userId: integer('user_id').references(() => users.id),
@@ -213,6 +235,7 @@ export const productsRelations = relations(products, ({ one, many }) => ({
   reviews: many(reviews),
   cartItems: many(cartItems),
   inventoryReservations: many(inventoryReservations),
+  inventoryMovements: many(inventoryMovements),
 }));
 
 export const cartItemsRelations = relations(cartItems, ({ one }) => ({

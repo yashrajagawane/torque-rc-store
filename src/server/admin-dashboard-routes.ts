@@ -26,8 +26,8 @@ export function createAdminDashboardRouter(database: Database) {
         database.select({ value: sum(orders.total) }).from(orders).where(and(gte(orders.createdAt, dayStart), eq(orders.paymentStatus, 'PAID'))),
         database.select({ value: count() }).from(orders).where(and(eq(orders.paymentStatus, 'UNPAID'), sql`${orders.fulfillmentStatus} <> 'CANCELLED'`)),
         database.select({ value: count() }).from(orders).where(and(eq(orders.paymentStatus, 'PAID'), eq(orders.fulfillmentStatus, 'UNFULFILLED'))),
-        database.select({ value: count() }).from(products).where(and(eq(products.isPublished, true), lte(products.stock, 5))),
-        database.select({ value: count() }).from(products).where(eq(products.isPublished, false)),
+        database.select({ value: count() }).from(products).where(and(eq(products.isPublished, true), eq(products.isArchived, false), sql`${products.stock} <= ${products.lowStockThreshold}`)),
+        database.select({ value: count() }).from(products).where(and(eq(products.isPublished, false), eq(products.isArchived, false))),
         database.select({ value: count() }).from(contactInquiries).where(eq(contactInquiries.status, 'NEW')),
         database.select({ value: count() }).from(paymentReviewCases).where(eq(paymentReviewCases.status, 'OPEN')),
       ]);
@@ -64,7 +64,7 @@ export function createAdminDashboardRouter(database: Database) {
           ...product,
           reservedStock: Number(reserved ?? 0),
           availableStock: Math.max(0, Number(product.stock ?? 0) - Number(reserved ?? 0)),
-          lowStock: Number(product.stock ?? 0) <= 5,
+          lowStock: Number(product.stock ?? 0) <= Number(product.lowStockThreshold ?? 5),
         })),
         lowStockThreshold: 5,
       });

@@ -15,6 +15,7 @@ const optionalText = (max: number) => z.preprocess(
   (value) => typeof value === 'string' && value.trim() === '' ? null : value,
   z.string().trim().max(max).nullable(),
 );
+const optionalUrl = z.preprocess((value) => typeof value === 'string' && value.trim() === '' ? null : value, z.string().trim().max(2048).nullable());
 
 const productImageSchema = z.string().trim().min(1).max(2048).refine((value) => {
   if (value.startsWith('/src/assets/images/')) return true;
@@ -42,6 +43,13 @@ export const productInputSchema = z.object({
   skillLevel: optionalText(50),
   featured: z.boolean(),
   newArrival: z.boolean(),
+  lowStockThreshold: z.number().int().min(0).max(1000000).default(5),
+  supplierName: optionalText(200).optional(),
+  supplierSku: optionalText(100).optional(),
+  costPrice: compareAtPriceSchema.optional(),
+  seoTitle: optionalText(200).optional(),
+  seoDescription: optionalText(5000).optional(),
+  socialImage: optionalUrl.optional(),
 }).strict().refine((product) => product.compareAtPrice === null || Number(product.compareAtPrice) > Number(product.price), {
   path: ['compareAtPrice'],
   message: 'Compare-at price must be higher than the selling price.',

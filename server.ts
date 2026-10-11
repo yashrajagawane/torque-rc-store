@@ -90,7 +90,7 @@ app.get('/api/products', async (req, res) => {
     .leftJoin(categories, eq(products.categoryId, categories.id))
     .$dynamic();
 
-    const conditions = [eq(products.isPublished, true)];
+    const conditions = [eq(products.isPublished, true), eq(products.isArchived, false)];
 
     if (brand) conditions.push(eq(brands.slug, brand as string));
     if (category) conditions.push(eq(categories.slug, category as string));
@@ -141,7 +141,7 @@ app.get('/api/products/:slug', async (req, res) => {
     .from(products)
     .leftJoin(brands, eq(products.brandId, brands.id))
     .leftJoin(categories, eq(products.categoryId, categories.id))
-    .where(and(eq(products.slug, slug), eq(products.isPublished, true)))
+    .where(and(eq(products.slug, slug), eq(products.isPublished, true), eq(products.isArchived, false)))
     .limit(1);
 
     if (result.length === 0) {

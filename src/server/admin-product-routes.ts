@@ -5,8 +5,8 @@ import { and, asc, desc, eq, gt, ilike, inArray, lte, or, sql } from 'drizzle-or
 import { createClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 import type { db } from '../db/index.ts';
-import { brands, categories, inventoryReservations, products } from '../db/schema.ts';
-import { requireAuth, requireOwner } from './auth.ts';
+import { brands, categories, inventoryMovements, inventoryReservations, products } from '../db/schema.ts';
+import { requireAuth, requireOwner, type AuthenticatedRequest } from './auth.ts';
 import { productInputSchema, productPublicationSchema, type ProductInput } from './product-validation.ts';
 import { MAX_PRODUCT_IMAGE_BYTES } from '../lib/product-upload.ts';
 
@@ -114,6 +114,7 @@ export function createAdminProductRouter(database: Database) {
     const publication = req.query.publication === 'published' || req.query.publication === 'draft' ? req.query.publication : '';
     const stockState = req.query.stock === 'low' || req.query.stock === 'out' ? req.query.stock : '';
     const sort = req.query.sort === 'name' || req.query.sort === 'stock' || req.query.sort === 'price' ? req.query.sort : 'updated';
+    const includeArchived = req.query.includeArchived === 'true';
     if (search.length > 100) {
       res.status(400).json({ error: 'Search text must be 100 characters or fewer.' });
       return;
@@ -125,6 +126,7 @@ export function createAdminProductRouter(database: Database) {
         .leftJoin(categories, eq(products.categoryId, categories.id))
         .$dynamic();
       const filters = [];
+      if (!includeArchived) filters.push(eq(products.isArchived, false));
       if (search) {
         const pattern = `%${search.replace(/[\\%_]/g, '\\$&')}%`;
         filters.push(or(ilike(products.name, pattern), ilike(products.slug, pattern)));
@@ -169,6 +171,59 @@ export function createAdminProductRouter(database: Database) {
     } catch (error) {
       reportProductError(error, res);
     }
+  });
+
+  router.patch('/products/:id/archive', async (req, res) => {
+    const id = getProductId(req.params.id);
+    const parsed = z.object({ isArchived: z.boolean() }).strict().safeParse(req.body);
+    if (!id || !parsed.success) { res.status(400).json({ error: 'Archive request is invalid.' }); return; }
+    try {
+      const [updated] = await database.update(products).set({ isArchived: parsed.data.isArchived, isPublished: parsed.data.isArchived ? false : undefined, updatedAt: new Date() }).where(eq(products.id, id)).returning();
+      if (!updated) { res.status(404).json({ error: 'Product not found.' }); return; }
+      res.json(updated);
+    } catch (error) { reportProductError(error, res); }
+  });
+
+  router.post('/products/:id/duplicate', async (req, res) => {
+    const id = getProductId(req.params.id);
+    if (!id) { res.status(400).json({ error: 'Product ID must be a positive integer.' }); return; }
+    try {
+      const [source] = await database.select().from(products).where(eq(products.id, id)).limit(1);
+      if (!source) { res.status(404).json({ error: 'Product not found.' }); return; }
+      const slug = `${source.slug}-copy-${Date.now().toString(36)}`;
+      const [copy] = await database.insert(products).values({ ...source, id: undefined, slug, name: `${source.name} Copy`, isPublished: false, isArchived: false, createdAt: new Date(), updatedAt: new Date() }).returning();
+      res.status(201).json(copy);
+    } catch (error) { reportProductError(error, res); }
+  });
+
+  router.post('/products/bulk-stock', async (req, res) => {
+    const parsed = z.object({ updates: z.array(z.object({ id: z.number().int().positive(), stock: z.number().int().min(0).max(1000000), reason: z.string().trim().min(3).max(200) }).strict()).min(1).max(100) }).strict().safeParse(req.body);
+    if (!parsed.success) { sendValidationError(res, parsed.error); return; }
+    const ownerAuthId = (req as AuthenticatedRequest).authUser?.id;
+    if (!ownerAuthId) { res.status(401).json({ error: 'Owner identity is unavailable.' }); return; }
+    try {
+      const updated = await database.transaction(async (transaction) => {
+        let count = 0;
+        for (const update of parsed.data.updates) {
+          const [product] = await transaction.select({ id: products.id, stock: products.stock }).from(products).where(eq(products.id, update.id)).for('update');
+          if (!product) continue;
+          const [reserved] = await transaction.select({ quantity: sql<number>`COALESCE(SUM(${inventoryReservations.quantity}), 0)::int` }).from(inventoryReservations).where(and(eq(inventoryReservations.productId, update.id), eq(inventoryReservations.status, 'ACTIVE'), gt(inventoryReservations.expiresAt, sql`clock_timestamp()`)));
+          if (update.stock < Number(reserved?.quantity ?? 0)) throw new Error(`Stock for product ${update.id} cannot be below active reservations.`);
+          const previousStock = Number(product.stock ?? 0); const delta = update.stock - previousStock;
+          if (delta !== 0) await transaction.insert(inventoryMovements).values({ productId: update.id, ownerAuthId, delta, previousStock, newStock: update.stock, reason: update.reason });
+          await transaction.update(products).set({ stock: update.stock, availability: availabilityForStock(update.stock), updatedAt: new Date() }).where(eq(products.id, update.id)); count += 1;
+        }
+        return count;
+      });
+      res.json({ updated });
+    } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : 'Stock update failed.' }); }
+  });
+
+  router.get('/products/:id/inventory-movements', async (req, res) => {
+    const id = getProductId(req.params.id);
+    if (!id) { res.status(400).json({ error: 'Product ID must be a positive integer.' }); return; }
+    try { res.json({ movements: await database.select().from(inventoryMovements).where(eq(inventoryMovements.productId, id)).orderBy(desc(inventoryMovements.createdAt)).limit(100) }); }
+    catch (error) { reportProductError(error, res); }
   });
 
   router.patch('/products/:id', async (req, res) => {

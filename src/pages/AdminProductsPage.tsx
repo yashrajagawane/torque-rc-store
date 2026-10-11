@@ -27,6 +27,14 @@ interface Product {
   featured: boolean | null;
   newArrival: boolean | null;
   isPublished: boolean;
+  isArchived: boolean;
+  lowStockThreshold: number;
+  supplierName: string | null;
+  supplierSku: string | null;
+  costPrice: string | null;
+  seoTitle: string | null;
+  seoDescription: string | null;
+  socialImage: string | null;
 }
 
 interface ProductForm {
@@ -46,12 +54,20 @@ interface ProductForm {
   skillLevel: string;
   featured: boolean;
   newArrival: boolean;
+  lowStockThreshold: number;
+  supplierName: string;
+  supplierSku: string;
+  costPrice: string;
+  seoTitle: string;
+  seoDescription: string;
+  socialImage: string;
 }
 
 const emptyForm: ProductForm = {
   name: '', slug: '', description: '', price: '', compareAtPrice: '', categoryId: 0, brandId: 0,
   images: [], stock: 0, scale: '', terrain: '', driveType: '', batteryType: '', skillLevel: '',
   featured: false, newArrival: false,
+  lowStockThreshold: 5, supplierName: '', supplierSku: '', costPrice: '', seoTitle: '', seoDescription: '', socialImage: '',
 };
 
 function formFromProduct(product: Product): ProductForm {
@@ -72,6 +88,9 @@ function formFromProduct(product: Product): ProductForm {
     skillLevel: product.skillLevel || '',
     featured: product.featured || false,
     newArrival: product.newArrival || false,
+    lowStockThreshold: product.lowStockThreshold ?? 5,
+    supplierName: product.supplierName || '', supplierSku: product.supplierSku || '', costPrice: product.costPrice || '',
+    seoTitle: product.seoTitle || '', seoDescription: product.seoDescription || '', socialImage: product.socialImage || '',
   };
 }
 
@@ -99,6 +118,8 @@ export function AdminProductsPage() {
   const [stockFilter, setStockFilter] = useState(() => searchParams.get('stock') || '');
   const [sortOrder, setSortOrder] = useState(() => searchParams.get('sort') || 'updated');
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [bulkStock, setBulkStockValue] = useState('');
+  const [bulkStockReason, setBulkStockReason] = useState('Owner stock correction');
 
   const request = useCallback(async (path: string, init: RequestInit = {}) => {
     const token = session?.access_token;
@@ -177,6 +198,23 @@ export function AdminProductsPage() {
     const rows = [['id', 'name', 'slug', 'price', 'stock', 'brand', 'category', 'published'], ...products.map((product) => [product.id, product.name, product.slug, product.price, product.stock ?? 0, product.brandName || '', product.categoryName || '', product.isPublished ? 'yes' : 'no'])];
     const blob = new Blob([rows.map((row) => row.map(escape).join(',')).join('\n')], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'fly-rc-products.csv'; anchor.click(); URL.revokeObjectURL(url);
+  }
+
+  async function archiveProduct(product: Product) {
+    try { await request(`/api/admin/products/${product.id}/archive`, { method: 'PATCH', body: JSON.stringify({ isArchived: true }) }); setNotice(`${product.name} archived.`); await loadProducts(search); }
+    catch (cause) { setFormError(cause instanceof Error ? cause.message : 'Could not archive product.'); }
+  }
+
+  async function duplicateProduct(product: Product) {
+    try { await request(`/api/admin/products/${product.id}/duplicate`, { method: 'POST' }); setNotice(`${product.name} duplicated as a draft.`); await loadProducts(search); }
+    catch (cause) { setFormError(cause instanceof Error ? cause.message : 'Could not duplicate product.'); }
+  }
+
+  async function setBulkStock() {
+    const stock = Number(bulkStock);
+    if (!selectedIds.length || !Number.isInteger(stock) || stock < 0 || !bulkStockReason.trim()) return;
+    try { const result = await request('/api/admin/products/bulk-stock', { method: 'POST', body: JSON.stringify({ updates: selectedIds.map((id) => ({ id, stock, reason: bulkStockReason })) }) }); setNotice(`${result.updated} stock record${result.updated === 1 ? '' : 's'} updated.`); setBulkStockValue(''); await loadProducts(search); }
+    catch (cause) { setFormError(cause instanceof Error ? cause.message : 'Bulk stock update failed.'); }
   }
 
   function beginCreate() {
@@ -313,6 +351,9 @@ export function AdminProductsPage() {
             <label className="text-xs uppercase tracking-wider text-muted-foreground">Stock
               <input required type="number" min="0" max="1000000" step="1" value={form.stock} onChange={(e) => setForm((v) => ({ ...v, stock: Number(e.target.value) }))} className={fieldClass} />
             </label>
+            <label className="text-xs uppercase tracking-wider text-muted-foreground">Low-stock threshold
+              <input required type="number" min="0" max="1000000" step="1" value={form.lowStockThreshold} onChange={(e) => setForm((v) => ({ ...v, lowStockThreshold: Number(e.target.value) }))} className={fieldClass} />
+            </label>
             <label className="text-xs uppercase tracking-wider text-muted-foreground">Scale
               <input maxLength={50} value={form.scale} onChange={(e) => setForm((v) => ({ ...v, scale: e.target.value }))} className={fieldClass} />
             </label>
@@ -328,6 +369,12 @@ export function AdminProductsPage() {
             <label className="text-xs uppercase tracking-wider text-muted-foreground">Skill level
               <input maxLength={50} value={form.skillLevel} onChange={(e) => setForm((v) => ({ ...v, skillLevel: e.target.value }))} className={fieldClass} />
             </label>
+            <label className="text-xs uppercase tracking-wider text-muted-foreground">Supplier<input maxLength={200} value={form.supplierName} onChange={(e) => setForm((v) => ({ ...v, supplierName: e.target.value }))} className={fieldClass} /></label>
+            <label className="text-xs uppercase tracking-wider text-muted-foreground">Supplier SKU<input maxLength={100} value={form.supplierSku} onChange={(e) => setForm((v) => ({ ...v, supplierSku: e.target.value }))} className={fieldClass} /></label>
+            <label className="text-xs uppercase tracking-wider text-muted-foreground">Cost price (INR)<input type="number" min="0" step="0.01" value={form.costPrice} onChange={(e) => setForm((v) => ({ ...v, costPrice: e.target.value }))} className={fieldClass} /></label>
+            <label className="text-xs uppercase tracking-wider text-muted-foreground">SEO title<input maxLength={200} value={form.seoTitle} onChange={(e) => setForm((v) => ({ ...v, seoTitle: e.target.value }))} className={fieldClass} /></label>
+            <label className="text-xs uppercase tracking-wider text-muted-foreground md:col-span-2">SEO description<textarea maxLength={5000} rows={2} value={form.seoDescription} onChange={(e) => setForm((v) => ({ ...v, seoDescription: e.target.value }))} className={fieldClass} /></label>
+            <label className="text-xs uppercase tracking-wider text-muted-foreground md:col-span-2">Social image URL<input maxLength={2048} value={form.socialImage} onChange={(e) => setForm((v) => ({ ...v, socialImage: e.target.value }))} className={fieldClass} /></label>
 
             <div className="md:col-span-2">
               <div className="flex items-center justify-between gap-4 mb-3"><div><p className="text-xs uppercase tracking-wider text-muted-foreground">Product images</p><p className="text-[11px] text-muted-foreground mt-1">The first image is used as the card thumbnail.</p></div><label className="btn-secondary px-4 py-2 text-[10px] cursor-pointer flex items-center gap-2"><Upload size={14} />{uploading ? 'UPLOADING…' : 'UPLOAD IMAGES'}<input className="sr-only" type="file" accept="image/jpeg,image/png,image/webp,image/avif" multiple disabled={uploading} onChange={(e) => { void uploadImages(e.target.files); e.currentTarget.value = ''; }} /></label></div>
@@ -360,7 +407,7 @@ export function AdminProductsPage() {
               <button onClick={exportCsv} className="btn-secondary px-3 py-2 text-[10px]">EXPORT CSV</button>
             </div>
           </div>
-          {selectedIds.length > 0 && <div className="flex flex-wrap items-center gap-2 border-b border-white/5 p-4"><span className="text-xs text-muted-foreground">{selectedIds.length} selected</span><button onClick={() => void bulkPublish(true)} disabled={publicationBusy !== null} className="btn-secondary px-3 py-2 text-[10px]">PUBLISH SELECTED</button><button onClick={() => void bulkPublish(false)} disabled={publicationBusy !== null} className="btn-secondary px-3 py-2 text-[10px]">UNPUBLISH SELECTED</button></div>}
+          {selectedIds.length > 0 && <div className="flex flex-wrap items-center gap-2 border-b border-white/5 p-4"><span className="text-xs text-muted-foreground">{selectedIds.length} selected</span><button onClick={() => void bulkPublish(true)} disabled={publicationBusy !== null} className="btn-secondary px-3 py-2 text-[10px]">PUBLISH SELECTED</button><button onClick={() => void bulkPublish(false)} disabled={publicationBusy !== null} className="btn-secondary px-3 py-2 text-[10px]">UNPUBLISH SELECTED</button><input type="number" min="0" value={bulkStock} onChange={(e) => setBulkStockValue(e.target.value)} placeholder="Set stock" className="w-24 bg-[#111] border border-white/10 px-2 py-2 text-xs" /><input value={bulkStockReason} onChange={(e) => setBulkStockReason(e.target.value)} placeholder="Reason" className="w-48 bg-[#111] border border-white/10 px-2 py-2 text-xs" /><button onClick={() => void setBulkStock()} className="btn-secondary px-3 py-2 text-[10px]">UPDATE STOCK</button></div>}
           {loading ? <p role="status" className="p-10 text-center text-sm text-muted-foreground">Loading products…</p> : products.length === 0 ? <p className="p-10 text-center text-sm text-muted-foreground">No products found.</p> : <div className="divide-y divide-white/5">
             {products.map((product) => <article key={product.id} className="p-4 md:px-5 flex flex-col md:flex-row md:items-center gap-4">
               <input type="checkbox" checked={selectedIds.includes(product.id)} onChange={(e) => setSelectedIds((current) => e.target.checked ? [...current, product.id] : current.filter((id) => id !== product.id))} aria-label={`Select ${product.name}`} />
@@ -370,6 +417,8 @@ export function AdminProductsPage() {
               <div className="flex gap-2">
                 <a href={`/products/${product.slug}`} target="_blank" rel="noreferrer" className="btn-secondary px-2 py-2 text-[10px]" title="Preview product">PREVIEW</a>
                 <button onClick={() => beginEdit(product)} className="btn-secondary p-2" title="Edit product"><Pencil size={15} /></button>
+                <button onClick={() => void duplicateProduct(product)} className="btn-secondary px-2 py-2 text-[10px]" title="Duplicate product">DUPLICATE</button>
+                <button onClick={() => void archiveProduct(product)} className="btn-secondary px-2 py-2 text-[10px]" title="Archive product">ARCHIVE</button>
                 <button disabled={publicationBusy === product.id} onClick={() => void setPublished(product, !product.isPublished)} className={`text-[10px] font-bold uppercase border px-3 py-2 disabled:opacity-50 ${product.isPublished ? 'border-white/10 text-muted-foreground hover:text-white' : 'border-accent/40 text-accent hover:bg-accent/10'}`}>{publicationBusy === product.id ? 'WAIT…' : product.isPublished ? 'UNPUBLISH' : 'PUBLISH'}</button>
               </div>
             </article>)}
